@@ -1,0 +1,268 @@
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Patch,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
+import { JwtAuthGuard } from 'src/auth/guards/jwt-auth.guard';
+import { PositionGuard } from 'src/auth/guards/position.guard';
+import { CurrentUser } from 'src/decorators/current-user.decorator';
+import { RequirePosition } from 'src/decorators/require-position.decorator';
+import { AdminGuard } from './guards/admin.guard';
+import { AdminService } from './admin.service';
+import { RejectListingDto } from './dto/reject-listing.dto';
+import { UpdateUserStatusDto } from './dto/update-user-status.dto';
+import { CreateAdminDto } from './dto/create-admin.dto';
+import { UpdateAdminDto } from './dto/update-admin.dto';
+import { GetListingsQueryDto } from './dto/get-listings-query.dto';
+import { GetUsersQueryDto } from './dto/get-users-query.dto';
+import { ScheduleTourDto } from './dto/schedule-tour.dto';
+import { GenerateAgreementDto } from './dto/generate-agreement.dto';
+import { CreateRentalPaymentDto } from './dto/create-rental-payment.dto';
+
+@UseGuards(JwtAuthGuard, AdminGuard)
+@Controller('admin')
+export class AdminController {
+  constructor(private readonly adminService: AdminService) {}
+
+  // ── Dashboard ──────────────────────────────────────────────────────────────
+
+  @Get('stats')
+  getStats() {
+    return this.adminService.getStats();
+  }
+
+  // ── Listings ───────────────────────────────────────────────────────────────
+
+  @Get('listings')
+  getAllListings(@Query() query: GetListingsQueryDto) {
+    return this.adminService.getAllListings(query);
+  }
+
+  @Get('listings/:slug')
+  findListing(@Param('slug') slug: string) {
+    return this.adminService.findListingBySlug(slug);
+  }
+
+  @Patch('listings/:id/approve')
+  @HttpCode(HttpStatus.OK)
+  approveListing(@Param('id') id: string) {
+    return this.adminService.approveListing(id);
+  }
+
+  @Patch('listings/:id/reject')
+  @HttpCode(HttpStatus.OK)
+  rejectListing(@Param('id') id: string, @Body() dto: RejectListingDto) {
+    return this.adminService.rejectListing(id, dto);
+  }
+
+  // ── Users ──────────────────────────────────────────────────────────────────
+
+  @Get('users')
+  getAllUsers(@Query() query: GetUsersQueryDto) {
+    return this.adminService.getAllUsers(query);
+  }
+
+  @Patch('users/:id/status')
+  @HttpCode(HttpStatus.OK)
+  updateUserStatus(
+    @Param('id') id: string,
+    @Body() dto: UpdateUserStatusDto,
+  ) {
+    return this.adminService.updateUserStatus(id, dto);
+  }
+
+  // ── Admin Team ─────────────────────────────────────────────────────────────
+
+  @Get('team')
+  getAdminTeam() {
+    return this.adminService.getAdminTeam();
+  }
+
+  @Post('team')
+  @HttpCode(HttpStatus.CREATED)
+  @UseGuards(PositionGuard)
+  @RequirePosition('SUPER_ADMIN')
+  createAdminAccount(@Body() dto: CreateAdminDto) {
+    return this.adminService.createAdminAccount(dto);
+  }
+
+  @Patch('team/:id')
+  @UseGuards(PositionGuard)
+  @RequirePosition('SUPER_ADMIN')
+  updateAdmin(@Param('id') id: string, @Body() dto: UpdateAdminDto) {
+    return this.adminService.updateAdmin(id, dto);
+  }
+
+  @Delete('team/:id')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(PositionGuard)
+  @RequirePosition('SUPER_ADMIN')
+  removeAdmin(
+    @Param('id') id: string,
+    @CurrentUser() user: { id: string },
+  ) {
+    return this.adminService.removeAdmin(id, user.id);
+  }
+
+  // ── Bookings ───────────────────────────────────────────────────────────────
+
+  @Get('bookings/stats')
+  getBookingStats() {
+    return this.adminService.getBookingStats();
+  }
+
+  @Get('bookings')
+  getAllBookings(
+    @Query() query: {
+      status?: string;
+      paymentStatus?: string;
+      search?: string;
+      page?: number;
+      limit?: number;
+    },
+  ) {
+    return this.adminService.getAllBookings(query);
+  }
+
+  @Get('bookings/:id')
+  getBookingById(@Param('id') id: string) {
+    return this.adminService.getBookingById(id);
+  }
+
+  @Patch('bookings/:id/cancel')
+  @HttpCode(HttpStatus.OK)
+  cancelBooking(
+    @Param('id') id: string,
+    @Body('reason') reason: string,
+  ) {
+    return this.adminService.adminCancelBooking(id, reason);
+  }
+
+  @Patch('bookings/:id/complete')
+  @HttpCode(HttpStatus.OK)
+  completeBooking(@Param('id') id: string) {
+    return this.adminService.adminCompleteBooking(id);
+  }
+
+  @Post('bookings/:id/refund')
+  @HttpCode(HttpStatus.OK)
+  refundBooking(
+    @Param('id') id: string,
+    @Body('amount') amount?: number,
+  ) {
+    return this.adminService.adminInitiateRefund(id, amount);
+  }
+
+  @Patch('bookings/:id/note')
+  @HttpCode(HttpStatus.OK)
+  addAdminNote(
+    @Param('id') id: string,
+    @Body('note') note: string,
+  ) {
+    return this.adminService.addAdminNote(id, note);
+  }
+
+  // ── Tour Requests ──────────────────────────────────────────────────────────
+
+  @Get('tours')
+  getTourRequests(@Query('status') status?: string) {
+    return this.adminService.getTourRequests(status);
+  }
+
+  @Get('tours/:id')
+  getTourRequestById(@Param('id') id: string) {
+    return this.adminService.getTourRequestById(id);
+  }
+
+  @Patch('tours/:id/schedule')
+  @HttpCode(HttpStatus.OK)
+  scheduleTour(@Param('id') id: string, @Body() dto: ScheduleTourDto) {
+    return this.adminService.scheduleTour(id, dto);
+  }
+
+  @Patch('tours/:id/complete')
+  @HttpCode(HttpStatus.OK)
+  completeTour(@Param('id') id: string) {
+    return this.adminService.completeTour(id);
+  }
+
+  @Patch('tours/:id/cancel')
+  @HttpCode(HttpStatus.OK)
+  cancelTour(@Param('id') id: string, @Body('reason') reason?: string) {
+    return this.adminService.cancelTour(id, reason);
+  }
+
+  // ── Screening Applications ─────────────────────────────────────────────────
+
+  @Get('screening-applications')
+  getScreeningApplications(@Query('status') status?: string) {
+    return this.adminService.getScreeningApplications(status);
+  }
+
+  @Get('screening-applications/:id')
+  getScreeningApplicationById(@Param('id') id: string) {
+    return this.adminService.getScreeningApplicationById(id);
+  }
+
+  @Patch('screening-applications/:id/review')
+  @HttpCode(HttpStatus.OK)
+  reviewApplication(
+    @Param('id') id: string,
+    @Body('status') status: 'APPROVED' | 'REJECTED',
+    @Body('note') note?: string,
+  ) {
+    return this.adminService.adminReviewApplication(id, status, note);
+  }
+
+  @Post('screening-applications/:id/verify-nin')
+  @HttpCode(HttpStatus.OK)
+  verifyApplicantNin(@Param('id') id: string) {
+    return this.adminService.verifyApplicantNin(id);
+  }
+
+  // ── Rental Agreements ──────────────────────────────────────────────────────
+
+  @Post('agreements')
+  @HttpCode(HttpStatus.CREATED)
+  generateAgreement(@Body() dto: GenerateAgreementDto) {
+    return this.adminService.generateAgreement(dto);
+  }
+
+  @Get('agreements')
+  getAgreements(@Query('status') status?: string) {
+    return this.adminService.getAgreements(status);
+  }
+
+  @Get('agreements/:id')
+  getAgreementById(@Param('id') id: string) {
+    return this.adminService.getAgreementById(id);
+  }
+
+  // ── Rental Payments ────────────────────────────────────────────────────────
+
+  @Post('rental-payments')
+  @HttpCode(HttpStatus.CREATED)
+  createRentalPayments(@Body() dto: CreateRentalPaymentDto) {
+    return this.adminService.createRentalPayments(dto);
+  }
+
+  @Patch('rental-payments/:id/paid')
+  @HttpCode(HttpStatus.OK)
+  markRentalPaymentPaid(@Param('id') id: string) {
+    return this.adminService.markRentalPaymentPaid(id);
+  }
+
+  @Patch('rental-payments/:id/overdue')
+  @HttpCode(HttpStatus.OK)
+  markRentalPaymentOverdue(@Param('id') id: string) {
+    return this.adminService.markRentalPaymentOverdue(id);
+  }
+}

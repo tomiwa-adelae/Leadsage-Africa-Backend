@@ -1,0 +1,492 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id            String  @id @default(uuid())
+  firstName     String?
+  lastName      String?
+  username      String? @unique
+  email         String  @unique
+  emailVerified Boolean @default(false)
+
+  image       String?
+  phoneNumber String?
+  gender      String?
+  address     String?
+  city        String?
+  state       String?
+  country     String?
+  bio         String?
+
+  role Role @default(CLIENT)
+
+  joinedDate String?
+
+  isDeleted           Boolean @default(false)
+  onboardingCompleted Boolean @default(false)
+
+  // Account moderation
+  accountStatus          AccountStatus @default(ACTIVE)
+  accountStatusReason    String?
+  accountStatusUpdatedAt DateTime?
+
+  // Onboarding profile fields
+  dob            String?
+  nin            String?
+  ninVerified    Boolean  @default(false)
+
+  // Renter preferences (CLIENT)
+  budgetMin              Int?
+  budgetMax              Int?
+  preferredPropertyTypes String[] @default([])
+  preferredAreas         String[] @default([])
+  moveInTimeline         String?
+
+  // Landlord profile fields
+  hasExistingProperty  Boolean?
+  propertyCount        String?
+  managedPropertyTypes String[] @default([])
+  operatingAreas       String[] @default([])
+
+  googleId     String? @unique
+  password     String?
+  refreshToken String?
+
+  resetOTP       String?
+  resetOTPExpiry DateTime?
+
+  provider String @default("local")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  admin         Admin?
+  listings      Listing[]
+  savedListings SavedListing[]
+  applications  Application[]
+  bookings      Booking[]
+  notifications Notification[]
+  tourRequests  TourRequest[]  @relation("TourUser")
+  agentTours    TourRequest[]  @relation("TourAgent")
+  rentalPayments RentalPayment[] @relation("RentalPaymentUser")
+}
+
+enum AdminPosition {
+  SUPER_ADMIN
+  ADMIN
+  MODERATOR
+}
+
+enum Role {
+  CLIENT
+  LANDLORD
+  ADMIN
+}
+
+model Admin {
+  id        String        @id @default(uuid())
+  userId    String        @unique
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  position  AdminPosition @default(ADMIN)
+  modules   String[]      @default([])
+  user      User          @relation(fields: [userId], references: [id])
+}
+
+model SavedListing {
+  id        String   @id @default(uuid())
+  userId    String
+  listingId String
+  createdAt DateTime @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listing Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, listingId])
+}
+
+model Application {
+  id        String            @id @default(uuid())
+  userId    String
+  listingId String
+  status    ApplicationStatus @default(PENDING)
+  message   String?
+  moveInDate DateTime?
+
+  landlordNote String?
+  reviewedAt   DateTime?
+
+  // Screening fields (filled during full application after tour)
+  tourRequestId    String?   @unique
+  screeningSubmittedAt DateTime?
+
+  // Identity
+  nin              String?
+  ninVerified      Boolean   @default(false)
+  ninVerifiedAt    DateTime?
+
+  // Employment
+  employmentStatus String?   // "employed" | "self-employed" | "student" | "unemployed"
+  employer         String?
+  jobTitle         String?
+  monthlyIncome    Float?
+  employmentDocUrl String?
+
+  // References
+  ref1Name         String?
+  ref1Phone        String?
+  ref1Relation     String?
+  ref2Name         String?
+  ref2Phone        String?
+  ref2Relation     String?
+
+  // Tenancy intent
+  tenancyMonths    Int?
+  reasonForMoving  String?
+
+  // Admin review (separate from landlord)
+  adminNote        String?
+  adminStatus      String?   // "PENDING" | "APPROVED" | "REJECTED"
+  adminReviewedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listing      Listing          @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  tourRequest  TourRequest?     @relation(fields: [tourRequestId], references: [id])
+  agreement    RentalAgreement?
+  payments     RentalPayment[]
+
+  @@unique([userId, listingId])
+}
+
+enum ApplicationStatus {
+  PENDING
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+  WITHDRAWN
+}
+
+model TourRequest {
+  id          String     @id @default(uuid())
+  listingId   String
+  userId      String
+  agentId     String?    // Leadsage agent assigned to conduct tour
+
+  status      TourStatus @default(PENDING)
+  preferredDate DateTime?
+  notes       String?    // renter's notes
+
+  scheduledAt DateTime?
+  agentNotes  String?
+  adminNotes  String?
+  completedAt DateTime?
+  cancelledAt DateTime?
+  cancelReason String?
+
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  listing     Listing    @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  user        User       @relation("TourUser", fields: [userId], references: [id], onDelete: Cascade)
+  agent       User?      @relation("TourAgent", fields: [agentId], references: [id])
+  application Application?
+}
+
+enum TourStatus {
+  PENDING
+  SCHEDULED
+  COMPLETED
+  CANCELLED
+}
+
+model RentalAgreement {
+  id            String          @id @default(uuid())
+  applicationId String          @unique
+  listingId     String
+  tenantId      String
+  landlordId    String
+
+  // Auto-generated HTML content
+  content       String          @db.Text
+
+  // Tenant e-signature
+  tenantSignedAt    DateTime?
+  tenantSignature   String?     // typed full name
+  tenantIpAddress   String?
+
+  // Landlord e-signature
+  landlordSignedAt  DateTime?
+  landlordSignature String?
+  landlordIpAddress String?
+
+  // Terms
+  startDate     DateTime
+  endDate       DateTime
+  monthlyRent   Float
+  cautionFee    Float?
+  serviceCharge Float?
+
+  status        AgreementStatus @default(PENDING_TENANT)
+
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  application   Application     @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  listing       Listing         @relation(fields: [listingId], references: [id])
+  payments      RentalPayment[]
+}
+
+enum AgreementStatus {
+  PENDING_TENANT
+  PENDING_LANDLORD
+  FULLY_SIGNED
+  CANCELLED
+}
+
+model RentalPayment {
+  id              String              @id @default(uuid())
+  applicationId   String
+  agreementId     String?
+  userId          String
+  listingId       String
+
+  amount          Float
+  dueDate         DateTime
+  installmentNo   Int?
+  totalInstallments Int?
+
+  paymentRef      String?
+  paystackRef     String?
+  paidAt          DateTime?
+
+  status          RentalPaymentStatus @default(PENDING)
+
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  application     Application         @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  agreement       RentalAgreement?    @relation(fields: [agreementId], references: [id])
+  user            User                @relation("RentalPaymentUser", fields: [userId], references: [id])
+  listing         Listing             @relation(fields: [listingId], references: [id])
+}
+
+enum RentalPaymentStatus {
+  PENDING
+  PAID
+  OVERDUE
+  WAIVED
+}
+
+model Booking {
+  id        String        @id @default(uuid())
+  userId    String
+  listingId String
+  status    BookingStatus @default(PENDING)
+
+  checkIn         DateTime
+  checkOut        DateTime
+  nights          Int
+  totalPrice      Float
+  guestCount      Int      @default(1)
+  specialRequests String?
+
+  // Payment
+  paymentStatus PaymentStatus @default(UNPAID)
+  paymentRef    String?
+  paidAt        DateTime?
+  refundedAt    DateTime?
+  refundAmount  Float?
+
+  landlordNote String?
+  adminNote    String?
+  confirmedAt  DateTime?
+  cancelledAt  DateTime?
+  cancelReason String?
+
+  // Check-in instructions (filled by landlord after confirmation)
+  keyHandover    String?   // e.g. "Lockbox at gate", "Meet agent", "Caretaker will assist"
+  accessCode     String?   // Gate / door code
+  checkInWindow  String?   // e.g. "2:00 PM – 10:00 PM"
+  checkOutTime   String?   // e.g. "11:00 AM"
+  directions     String?   // Landmark-based directions
+  mapLink        String?   // Google Maps pin URL
+  wifiName       String?
+  wifiPassword   String?
+  houseRules     String?
+  emergencyContact String? // Name + phone of caretaker / agent
+  generatorInfo  String?   // Generator hours / fuel arrangement
+  waterInfo      String?   // Borehole, tank schedule, etc.
+  securityInfo   String?   // Estate / security entry protocol
+  instructionsPublishedAt DateTime? // Set when landlord saves instructions
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listing Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  REJECTED
+}
+
+enum PaymentStatus {
+  UNPAID
+  PAID
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+model Notification {
+  id        String           @id @default(uuid())
+  userId    String
+  type      NotificationType
+  title     String
+  body      String
+  isRead    Boolean          @default(false)
+  data      Json?
+  createdAt DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+enum NotificationType {
+  APPLICATION_STATUS
+  BOOKING_STATUS
+  LISTING_APPROVED
+  LISTING_REJECTED
+  GENERAL
+}
+
+model Listing {
+  id         String   @id @default(uuid())
+  landlordId String
+  landlord   User     @relation(fields: [landlordId], references: [id])
+
+  // Basic info
+  slug             String?     @unique
+  listingType      ListingType
+  title            String
+  summary          String?
+  description      String      // TipTap JSON string
+
+  // Location
+  state   String
+  lga     String
+  area    String
+  address String
+
+  // Property details
+  propertyCategory PropertyCategory
+  bedrooms         Int
+  bathrooms        Int
+  toilets          Int
+  sizeInSqm        Float?
+  furnished        FurnishedStatus
+
+  // Pricing — long-term / office
+  pricePerYear     Float?
+  paymentFrequency PaymentFrequency?
+  cautionFee       Float?
+  serviceCharge    Float?
+
+  // Pricing — shortlet / hotel
+  pricePerNight Float?
+  minimumNights Int?
+
+  // Amenities & rules
+  amenities      String[]  @default([])
+  petFriendly    Boolean   @default(false)
+  smokingAllowed Boolean   @default(false)
+  availableFrom  DateTime
+
+  // Media
+  photos String[] @default([])
+
+  // Moderation
+  status          ListingStatus @default(DRAFT)
+  rejectionReason String?
+
+  // Booking settings
+  instantBook Boolean @default(false)
+
+  // Stats
+  views Int @default(0)
+
+  isDeleted Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  savedBy         SavedListing[]
+  applications    Application[]
+  bookings        Booking[]
+  tourRequests    TourRequest[]
+  rentalAgreements RentalAgreement[]
+  rentalPayments  RentalPayment[]
+}
+
+// ── Listing enums ─────────────────────────────────────────────────────────────
+
+enum ListingType {
+  LONG_TERM
+  SHORTLET
+  OFFICE_SPACE
+  HOTEL_ROOM
+}
+
+enum PropertyCategory {
+  APARTMENT
+  DUPLEX
+  BUNGALOW
+  TERRACED
+  SEMI_DETACHED
+  DETACHED
+  MANSION
+  STUDIO
+  PENTHOUSE
+  OFFICE
+  HOTEL_ROOM
+}
+
+enum FurnishedStatus {
+  FURNISHED
+  SEMI_FURNISHED
+  UNFURNISHED
+}
+
+enum PaymentFrequency {
+  MONTHLY
+  QUARTERLY
+  BI_ANNUALLY
+  ANNUALLY
+}
+
+enum ListingStatus {
+  DRAFT
+  PENDING_REVIEW
+  PUBLISHED
+  REJECTED
+  ARCHIVED
+}
+
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+  BANNED
+}
