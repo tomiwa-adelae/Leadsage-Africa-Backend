@@ -9,8 +9,10 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Request } from 'express';
+import { createHmac } from 'crypto';
 import { PaystackService } from 'src/paystack/paystack.service';
 import { PrismaService } from 'src/prisma/prisma.service';
+import { WalletService } from 'src/wallet/wallet.service';
 
 @Controller('webhooks')
 export class WebhooksController {
@@ -19,7 +21,149 @@ export class WebhooksController {
   constructor(
     private readonly paystack: PaystackService,
     private readonly prisma: PrismaService,
+    private readonly wallet: WalletService,
   ) {}
+
+  // ── Anchor webhook ─────────────────────────────────────────────────────────
+
+  @Post('anchor')
+  @HttpCode(HttpStatus.OK)
+  async handleAnchor(
+    @Req() req: RawBodyRequest<Request>,
+    @Headers('x-anchor-signature') signature: string,
+  ) {
+    const rawBody = req.rawBody;
+    if (!rawBody) return { received: true };
+
+    // Verify signature using ANCHOR_SECRET_KEY
+    const secret = process.env.ANCHOR_SECRET_KEY ?? '';
+    if (secret && signature) {
+      const expected = createHmac('sha256', secret)
+        .update(rawBody)
+        .digest('hex');
+      if (expected !== signature) {
+        this.logger.warn('Invalid Anchor webhook signature');
+        return { received: true };
+      }
+    }
+
+    let event: any;
+    try {
+      event = JSON.parse(rawBody.toString());
+    } catch {
+      return { received: true };
+    }
+
+    // Log the full event for debugging during integration
+    const eventType: string = event?.data?.type ?? event?.event ?? event?.type ?? '';
+    this.logger.log(`Anchor event type: "${eventType}" | id: ${event?.data?.id ?? event?.id ?? '-'}`);
+
+    // Inbound NIP / RTP / Pay events — money arrived into a virtual account
+    const INBOUND_EVENTS = [
+      'nip.inbound_settled',
+      'nip.inbound_completed',
+      'nip.inbound_received',
+      'rtp.inbound_settled',
+      'rtp.inbound_completed',
+      'rtp.inbound_received',
+      'pay.inbound_received',
+      'pay.inbound_completed',
+      'pay.inbound_settled',
+      // Anchor v1 style
+      'NipInboundSettled',
+      'NipInboundCompleted',
+      'NipInboundReceived',
+      'transaction.successful',
+      'Transaction',
+    ];
+
+    const isInbound =
+      INBOUND_EVENTS.some((e) => eventType.toLowerCase() === e.toLowerCase()) ||
+      // fallback: any event with a credit/inbound direction
+      ['credit', 'inbound', 'deposit'].some((k) =>
+        eventType.toLowerCase().includes(k),
+      );
+
+    if (isInbound) {
+      await this.handleAnchorInbound(event).catch((e) =>
+        this.logger.error(`Anchor inbound handler error: ${e}`),
+      );
+    }
+
+    return { received: true };
+  }
+
+  private async handleAnchorInbound(event: any) {
+    // Anchor wraps payload in event.data (JSON:API style)
+    const data = event?.data ?? event;
+    const attrs = data?.attributes ?? {};
+    const relationships = data?.relationships ?? {};
+
+    // Amount — Anchor sends kobo
+    const amountKobo: number = attrs?.amount ?? data?.amount ?? 0;
+    const amountNGN = amountKobo / 100;
+    if (amountNGN <= 0) return;
+
+    // Find destination account
+    // NIP inbound: relationships.account.data.id  OR  attrs.destinationAccountId
+    const anchorAccountId: string =
+      relationships?.account?.data?.id ??
+      relationships?.destinationAccount?.data?.id ??
+      attrs?.destinationAccountId ??
+      attrs?.accountId ??
+      data?.accountId ??
+      '';
+
+    if (!anchorAccountId) {
+      this.logger.warn(`Anchor inbound: no accountId in payload — full event: ${JSON.stringify(event)}`);
+      return;
+    }
+
+    const wallet = await this.prisma.walletAccount.findUnique({
+      where: { anchorAccountId },
+    });
+
+    if (!wallet) {
+      this.logger.warn(`Anchor inbound: no wallet for accountId ${anchorAccountId}`);
+      return;
+    }
+
+    // Idempotency key — prefer Anchor's own transaction/event ID
+    const anchorRef: string = data?.id ?? attrs?.reference ?? attrs?.sessionId ?? '';
+    const reference = `anchor-${anchorRef || Date.now()}`;
+
+    const existing = await this.prisma.walletTransaction.findUnique({
+      where: { reference },
+    });
+    if (existing) return;
+
+    const narration: string =
+      attrs?.narration ?? attrs?.description ?? attrs?.remark ?? 'Bank transfer received';
+
+    await this.wallet.creditWallet(
+      wallet.userId,
+      amountNGN,
+      narration,
+      { type: 'CREDIT', reference },
+    );
+
+    // Notify user
+    await this.prisma.notification.create({
+      data: {
+        userId: wallet.userId,
+        type: 'GENERAL',
+        title: 'Wallet funded',
+        body: `₦${amountNGN.toLocaleString()} has been added to your Leadsage wallet.`,
+        data: { anchorAccountId, amount: amountNGN },
+      },
+    });
+
+    this.logger.log(
+      `Wallet credited: ₦${amountNGN} → user ${wallet.userId}`,
+    );
+  }
+
+  // ── Paystack webhook ───────────────────────────────────────────────────────
 
   @Post('paystack')
   @HttpCode(HttpStatus.OK)
@@ -58,73 +202,111 @@ export class WebhooksController {
   private async handleChargeSuccess(data: any) {
     const reference: string = data.reference;
     const amountKobo: number = data.amount;
+    const amountNGN = amountKobo / 100;
     const paidAt: string = data.paid_at;
     const metadata: Record<string, any> = data.metadata ?? {};
+
+    // ── Shortlet booking payment ───────────────────────────────────────────
     const bookingId: string | undefined = metadata.bookingId;
-
-    if (!bookingId) return;
-
-    const booking = await this.prisma.booking.findUnique({
-      where: { id: bookingId },
-      include: {
-        listing: {
-          select: {
-            title: true,
-            landlordId: true,
-            instantBook: true,
-          },
+    if (bookingId) {
+      const booking = await this.prisma.booking.findUnique({
+        where: { id: bookingId },
+        include: {
+          listing: { select: { title: true, landlordId: true, instantBook: true } },
+          user: { select: { email: true, firstName: true } },
         },
-        user: { select: { email: true, firstName: true } },
-      },
-    });
+      });
 
-    if (!booking || booking.paymentStatus === 'PAID') return;
+      if (!booking || booking.paymentStatus === 'PAID') return;
 
-    // Determine new booking status
-    const newStatus = booking.listing.instantBook ? 'CONFIRMED' : 'PENDING';
+      const newStatus = booking.listing.instantBook ? 'CONFIRMED' : 'PENDING';
 
-    await this.prisma.booking.update({
-      where: { id: bookingId },
-      data: {
-        paymentStatus: 'PAID',
-        paymentRef: reference,
-        paidAt: new Date(paidAt),
-        status: newStatus,
-        ...(booking.listing.instantBook
-          ? { confirmedAt: new Date() }
-          : {}),
-      },
-    });
+      await this.prisma.booking.update({
+        where: { id: bookingId },
+        data: {
+          paymentStatus: 'PAID',
+          paymentRef: reference,
+          paidAt: new Date(paidAt),
+          status: newStatus,
+          ...(booking.listing.instantBook ? { confirmedAt: new Date() } : {}),
+        },
+      });
 
-    // Notify the guest
-    await this.prisma.notification.create({
-      data: {
-        userId: booking.userId,
-        type: 'BOOKING_STATUS',
-        title: booking.listing.instantBook
-          ? 'Booking confirmed!'
-          : 'Payment received — awaiting host confirmation',
-        body: booking.listing.instantBook
-          ? `Your booking for "${booking.listing.title}" is confirmed. Enjoy your stay!`
-          : `Payment of ₦${(amountKobo / 100).toLocaleString()} received. The host will confirm your booking shortly.`,
-        data: { bookingId },
-      },
-    });
+      // Create escrow — release 24h after check-in
+      const hoursUntilCheckin = Math.max(
+        24,
+        Math.ceil((new Date(booking.checkIn).getTime() - Date.now()) / 3_600_000) + 24,
+      );
+      await this.wallet.createEscrowFromCard({
+        payerId: booking.userId,
+        landlordId: booking.listing.landlordId,
+        amountNGN,
+        type: 'SHORTLET_BOOKING',
+        bookingId,
+        paystackRef: reference,
+        releaseHoursFromNow: hoursUntilCheckin,
+      }).catch((e) => this.logger.error(`Escrow create failed: ${e}`));
 
-    // Notify the landlord
-    await this.prisma.notification.create({
-      data: {
-        userId: booking.listing.landlordId,
-        type: 'BOOKING_STATUS',
-        title: booking.listing.instantBook
-          ? 'New instant booking confirmed'
-          : 'New booking — payment received',
-        body: booking.listing.instantBook
-          ? `A booking for "${booking.listing.title}" has been confirmed and paid. Check your dashboard.`
-          : `A guest has paid for "${booking.listing.title}". Please confirm or reject within 24 hours.`,
-        data: { bookingId },
-      },
-    });
+      await this.prisma.notification.create({
+        data: {
+          userId: booking.userId,
+          type: 'BOOKING_STATUS',
+          title: booking.listing.instantBook ? 'Booking confirmed!' : 'Payment received — awaiting host confirmation',
+          body: booking.listing.instantBook
+            ? `Your booking for "${booking.listing.title}" is confirmed. Enjoy your stay!`
+            : `Payment of ₦${amountNGN.toLocaleString()} received. The host will confirm your booking shortly.`,
+          data: { bookingId },
+        },
+      });
+
+      await this.prisma.notification.create({
+        data: {
+          userId: booking.listing.landlordId,
+          type: 'BOOKING_STATUS',
+          title: booking.listing.instantBook ? 'New instant booking confirmed' : 'New booking — payment received',
+          body: booking.listing.instantBook
+            ? `A booking for "${booking.listing.title}" has been confirmed and paid.`
+            : `A guest has paid for "${booking.listing.title}". Please confirm or reject within 24 hours.`,
+          data: { bookingId },
+        },
+      });
+      return;
+    }
+
+    // ── Rental payment via card ────────────────────────────────────────────
+    const rentalPaymentId: string | undefined = metadata.rentalPaymentId;
+    if (rentalPaymentId) {
+      const payment = await this.prisma.rentalPayment.findUnique({
+        where: { id: rentalPaymentId },
+        include: { listing: { select: { landlordId: true } } },
+      });
+      if (!payment || payment.status === 'PAID') return;
+
+      await this.prisma.rentalPayment.update({
+        where: { id: rentalPaymentId },
+        data: { status: 'PAID', paidAt: new Date(paidAt), paystackRef: reference },
+      });
+
+      await this.wallet.createEscrowFromCard({
+        payerId: payment.userId,
+        landlordId: payment.listing.landlordId,
+        amountNGN,
+        type: 'RENTAL_PAYMENT',
+        rentalPaymentId,
+        paystackRef: reference,
+        releaseHoursFromNow: 24,
+      }).catch((e) => this.logger.error(`Escrow create failed: ${e}`));
+
+      await this.prisma.notification.create({
+        data: {
+          userId: payment.userId,
+          type: 'GENERAL',
+          title: 'Rent payment received',
+          body: `Your rent payment of ₦${amountNGN.toLocaleString()} has been received and is being processed.`,
+          data: { rentalPaymentId },
+        },
+      });
+    }
   }
 
   private async handleRefundProcessed(data: any) {

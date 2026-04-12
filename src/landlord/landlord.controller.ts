@@ -183,4 +183,15 @@ export class LandlordController {
     const ip = req.ip ?? req.headers['x-forwarded-for']?.toString();
     return this.landlordService.signAgreementAsLandlord(user.id, id, signature, ip);
   }
+
+  // ── Listing availability ────────────────────────────────────────────────────
+
+  @Patch('listings/:id/mark-available')
+  @HttpCode(HttpStatus.OK)
+  markListingAvailable(
+    @CurrentUser() user: { id: string },
+    @Param('id') id: string,
+  ) {
+    return this.landlordService.markListingAvailable(user.id, id);
+  }
 }

@@ -1,0 +1,316 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { v4 as uuidv4 } from 'uuid';
+
+const ANCHOR_BASE =
+  process.env.ANCHOR_BASE_URL ?? 'https://api.sandbox.getanchor.co';
+
+@Injectable()
+export class AnchorService {
+  private readonly logger = new Logger(AnchorService.name);
+
+  private get headers() {
+    return {
+      'Content-Type': 'application/json',
+      'x-anchor-key': process.env.ANCHOR_SECRET_KEY ?? '',
+    };
+  }
+
+  private async request<T = any>(
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<T> {
+    const res = await fetch(`${ANCHOR_BASE}${path}`, {
+      method,
+      headers: this.headers,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+
+    const text = await res.text();
+    let json: any;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      json = { raw: text };
+    }
+
+    if (!res.ok) {
+      this.logger.error(`Anchor ${method} ${path} → ${res.status}: ${text}`);
+      throw new Error(
+        json?.errors?.[0]?.detail ??
+          json?.message ??
+          `Anchor error ${res.status}`,
+      );
+    }
+    return json as T;
+  }
+
+  // ── Customers ──────────────────────────────────────────────────────────────
+
+  private sanitizePhone(phone: string): string {
+    let clean = phone.replace(/\D/g, '');
+    if (clean.startsWith('234') && clean.length > 10) {
+      clean = '0' + clean.slice(3);
+    }
+    return clean || '08000000000';
+  }
+
+  async findCustomerByEmail(email: string): Promise<string | null> {
+    try {
+      const data = await this.request<any>(
+        'GET',
+        `/api/v1/customers?email=${encodeURIComponent(email)}`,
+      );
+      const customers = data?.data ?? [];
+      return customers[0]?.id ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  async createOrFetchCustomer(params: {
+    firstName: string;
+    lastName: string;
+    middleName?: string;
+    email: string;
+    phoneNumber: string;
+    address?: {
+      addressLine_1?: string;
+      city?: string;
+      state?: string;
+      postalCode?: string;
+    };
+  }): Promise<string> {
+    try {
+      const data = await this.request<any>('POST', '/api/v1/customers', {
+        data: {
+          type: 'IndividualCustomer',
+          attributes: {
+            fullName: {
+              firstName: params.firstName || 'User',
+              lastName: params.lastName || 'Customer',
+              middleName: params.middleName ?? '',
+            },
+            email: params.email,
+            phoneNumber: this.sanitizePhone(params.phoneNumber),
+            address: {
+              addressLine_1:
+                params.address?.addressLine_1 ?? '1 Street Address',
+              city: params.address?.city ?? 'Lagos',
+              state: params.address?.state ?? 'Lagos',
+              country: 'NG',
+              postalCode: params.address?.postalCode ?? '100001',
+            },
+          },
+        },
+      });
+      return data?.data?.id as string;
+    } catch (err: any) {
+      if (err.message?.toLowerCase().includes('already exist')) {
+        this.logger.log(
+          `Customer already exists in Anchor, fetching by email: ${params.email}`,
+        );
+        const existingId = await this.findCustomerByEmail(params.email);
+        if (existingId) return existingId;
+      }
+      throw err;
+    }
+  }
+
+  // ── BVN verification ────────────────────────────────────────────────────────
+
+  async verifyBvn(
+    customerId: string,
+    params: {
+      bvn: string;
+      dateOfBirth: string; // YYYY-MM-DD
+      gender: 'Male' | 'Female';
+    },
+  ) {
+    return this.request(
+      'POST',
+      `/api/v1/customers/${customerId}/verification/individual`,
+      {
+        data: {
+          type: 'Verification',
+          attributes: {
+            level: 'TIER_2',
+            level2: {
+              bvn: params.bvn,
+              dateOfBirth: params.dateOfBirth,
+              gender: params.gender,
+            },
+          },
+        },
+      },
+    );
+  }
+
+  // ── Accounts ────────────────────────────────────────────────────────────────
+
+  async createDepositAccount(customerId: string): Promise<{
+    id: string;
+    accountNumber: string | null;
+    accountName: string | null;
+    bankName: string | null;
+    bankCode: string | null;
+  }> {
+    const data = await this.request<any>('POST', '/api/v1/accounts', {
+      data: {
+        type: 'DepositAccount',
+        attributes: { productName: 'SAVINGS' },
+        relationships: {
+          customer: {
+            data: { type: 'Customer', id: customerId },
+          },
+        },
+      },
+    });
+
+    const accountId = data?.data?.id as string;
+    const attrs = data?.data?.attributes ?? {};
+
+    const accountNumbers = await this.getAccountNumbers(accountId);
+    const accountNum = accountNumbers?.[0]?.attributes ?? null;
+
+    return {
+      id: accountId,
+      accountNumber: accountNum?.accountNumber ?? null,
+      accountName: accountNum?.name ?? attrs?.accountName ?? null,
+      bankName: accountNum?.bank?.name ?? null,
+      bankCode: accountNum?.bank?.code ?? null,
+    };
+  }
+
+  async getAccountNumbers(accountId: string): Promise<any[]> {
+    try {
+      const res = await this.request<any>(
+        'GET',
+        `/api/v1/account-numbers?AccountId=${accountId}`,
+      );
+      return res?.data ?? [];
+    } catch {
+      return [];
+    }
+  }
+
+  async getAccount(accountId: string) {
+    return this.request<any>('GET', `/api/v1/accounts/${accountId}`);
+  }
+
+  async getAccountsByCustomer(customerId: string) {
+    return this.request<any>(
+      'GET',
+      `/api/v1/accounts?customerId=${customerId}`,
+    );
+  }
+
+  async getAccountBalance(accountId: string): Promise<number> {
+    const data = await this.getAccount(accountId);
+    const kobo = data?.data?.attributes?.balance ?? 0;
+    return kobo / 100;
+  }
+
+  async pollVirtualNubans(
+    accountId: string,
+    attempts = 6,
+    delayMs = 3000,
+  ): Promise<{
+    accountNumber: string;
+    accountName: string;
+    bankName: string;
+    bankCode: string;
+  } | null> {
+    for (let i = 0; i < attempts; i++) {
+      try {
+        const res = await this.getVirtualNubans(accountId);
+        const nuban = res?.data?.[0]?.attributes;
+        if (nuban?.accountNumber) return nuban;
+      } catch {
+        // Not ready yet — retry
+      }
+      if (i < attempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+    return null;
+  }
+
+  async getVirtualNubans(accountId: string) {
+    return this.request<any>(
+      'GET',
+      `/api/v1/accounts/${accountId}/virtual-nubans`,
+    );
+  }
+
+  // ── Transfers ───────────────────────────────────────────────────────────────
+
+  async createCounterparty(params: {
+    bankCode: string;
+    accountNumber: string;
+    accountName: string;
+  }) {
+    const data = await this.request<any>('POST', '/api/v1/counterparties', {
+      bankCode: params.bankCode,
+      accountNumber: params.accountNumber,
+      accountName: params.accountName,
+    });
+    return data?.data?.id as string;
+  }
+
+  async initiateTransfer(params: {
+    accountId: string;
+    counterpartyId: string;
+    amountNaira: number;
+    reference: string;
+    reason: string;
+  }) {
+    return this.request<any>('POST', '/api/v1/transfers', {
+      amount: Math.round(params.amountNaira * 100),
+      currency: 'NGN',
+      reason: params.reason.slice(0, 100),
+      reference: params.reference,
+      account: { id: params.accountId },
+      counterParty: { id: params.counterpartyId },
+    });
+  }
+
+  async internalTransfer(params: {
+    fromAccountId: string;
+    toAccountId: string;
+    amountNaira: number;
+    reference?: string;
+    reason?: string;
+  }) {
+    return this.request<any>('POST', '/api/v1/transfers', {
+      data: {
+        type: 'BookTransfer',
+        attributes: {
+          amount: Math.round(params.amountNaira * 100),
+          currency: 'NGN',
+          reason: (params.reason ?? 'Internal transfer').slice(0, 100),
+          reference: params.reference ?? uuidv4(),
+        },
+        relationships: {
+          account: {
+            data: { id: params.fromAccountId, type: 'DepositAccount' },
+          },
+          destinationAccount: {
+            data: { id: params.toAccountId, type: 'DepositAccount' },
+          },
+        },
+      },
+    });
+  }
+
+  async getBanks() {
+    return this.request<any>('GET', '/api/v1/banks');
+  }
+
+  async verifyAccount(bankCode: string, accountNumber: string) {
+    return this.request<any>(
+      'GET',
+      `/api/v1/payments/verify-account/${bankCode}/${accountNumber}`,
+    );
+  }
+}

@@ -533,7 +533,7 @@ export class LandlordService {
     const agreement = await this.prisma.rentalAgreement.findFirst({
       where: { id: agreementId, landlordId },
       include: {
-        listing: { select: { title: true } },
+        listing: { select: { title: true, id: true } },
         application: { select: { userId: true } },
       },
     });
@@ -551,6 +551,12 @@ export class LandlordService {
       },
     });
 
+    // Mark listing as occupied so no new tours/applications can be made
+    await this.prisma.listing.update({
+      where: { id: agreement.listingId },
+      data: { status: 'OCCUPIED' },
+    });
+
     // Notify tenant
     await this.prisma.notification.create({
       data: {
@@ -563,6 +569,20 @@ export class LandlordService {
     });
 
     return updated;
+  }
+
+  async markListingAvailable(landlordId: string, listingId: string) {
+    const listing = await this.prisma.listing.findFirst({
+      where: { id: listingId, landlordId, isDeleted: false },
+    });
+    if (!listing) throw new NotFoundException('Listing not found');
+    if (listing.status !== 'OCCUPIED')
+      throw new BadRequestException('Listing is not currently marked as occupied');
+
+    return this.prisma.listing.update({
+      where: { id: listingId },
+      data: { status: 'PUBLISHED' },
+    });
   }
 
   // ── Listing instant-book toggle ────────────────────────────────────────────

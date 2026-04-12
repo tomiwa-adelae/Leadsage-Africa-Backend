@@ -402,6 +402,41 @@ export class UserService {
     };
   }
 
+  /** Re-initialize Paystack for an existing UNPAID booking */
+  async initiateBookingPayment(userId: string, bookingId: string) {
+    const booking = await this.prisma.booking.findFirst({
+      where: { id: bookingId, userId },
+      include: { listing: { select: { title: true, id: true } } },
+    });
+    if (!booking) throw new NotFoundException('Booking not found');
+    if (booking.paymentStatus === 'PAID')
+      throw new BadRequestException('Already paid');
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true },
+    });
+
+    const frontendUrl =
+      process.env.FRONTEND_URL?.split(',')[0]?.trim() ?? 'http://localhost:3000';
+    const callbackUrl = `${frontendUrl}/bookings/payment/callback`;
+
+    const { authorizationUrl, reference } =
+      await this.paystack.initializeTransaction(
+        user!.email,
+        booking.totalPrice,
+        { bookingId: booking.id, userId },
+        callbackUrl,
+      );
+
+    await this.prisma.booking.update({
+      where: { id: bookingId },
+      data: { paymentRef: reference },
+    });
+
+    return { paymentUrl: authorizationUrl, reference };
+  }
+
   async getBookingByReference(userId: string, paymentRef: string) {
     const booking = await this.prisma.booking.findFirst({
       where: { userId, paymentRef },

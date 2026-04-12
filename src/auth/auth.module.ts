@@ -6,9 +6,10 @@ import { TokenService } from './token.service';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { LocalStrategy } from './strategies/local.strategies';
 import { JwtStrategy } from './strategies/jwt.strategy';
+import { WalletModule } from 'src/wallet/wallet.module';
 
 @Module({
-  imports: [JwtModule.register({})],
+  imports: [JwtModule.register({}), WalletModule],
   controllers: [AuthController],
   providers: [
     AuthService,

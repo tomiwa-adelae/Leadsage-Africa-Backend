@@ -1,0 +1,577 @@
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
+import { PrismaService } from 'src/prisma/prisma.service';
+import { AnchorService } from 'src/anchor/anchor.service';
+import { randomUUID } from 'crypto';
+
+const COMMISSION_RATE = 0.05; // 5%
+const SHORTLET_HOLD_HOURS = 24; // release 24h after check-in
+const RENTAL_HOLD_HOURS = 24;   // release 24h after payment
+
+@Injectable()
+export class WalletService {
+  private readonly logger = new Logger(WalletService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly anchor: AnchorService,
+  ) {}
+
+  // ── Wallet provisioning ────────────────────────────────────────────────────
+
+  /**
+   * Called on user signup. Creates a locked wallet record (no Anchor account yet).
+   * Anchor account is created only after KYC (BVN submission).
+   */
+  async provisionWallet(userId: string): Promise<void> {
+    const existing = await this.prisma.walletAccount.findUnique({ where: { userId } });
+    if (existing) return;
+    await this.prisma.walletAccount.create({ data: { userId } });
+  }
+
+  /**
+   * Submit BVN KYC. Creates the Anchor customer + deposit account + fetches NUBAN.
+   * Activates the wallet on success.
+   */
+  async submitKyc(
+    userId: string,
+    bvn: string,
+    dateOfBirth: string,
+    gender: 'Male' | 'Female',
+  ) {
+    let wallet = await this.prisma.walletAccount.findUnique({ where: { userId } });
+    if (!wallet) wallet = await this.prisma.walletAccount.create({ data: { userId } });
+    if (wallet.kycStatus === 'VERIFIED')
+      throw new BadRequestException('KYC already verified');
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        firstName: true,
+        lastName: true,
+        email: true,
+        phoneNumber: true,
+      },
+    });
+    if (!user) throw new NotFoundException('User not found');
+
+    // Mark as submitted immediately
+    await this.prisma.walletAccount.update({
+      where: { userId },
+      data: { bvn, dateOfBirth, gender, kycStatus: 'SUBMITTED' },
+    });
+
+    try {
+      // 1. Create (or fetch existing) Anchor customer
+      const anchorCustomerId = await this.anchor.createOrFetchCustomer({
+        firstName: user.firstName ?? '',
+        lastName: user.lastName ?? '',
+        email: user.email,
+        phoneNumber: user.phoneNumber ?? '08000000000',
+      });
+
+      // 2. Submit BVN for Tier 1
+      await this.anchor.verifyBvn(anchorCustomerId, { bvn, dateOfBirth, gender });
+
+      // 3. Create deposit account (returns id + account number details)
+      const account = await this.anchor.createDepositAccount(anchorCustomerId);
+
+      // 4. Poll for virtual NUBAN (assigned async by Anchor — usually a few seconds)
+      const nuban = account.accountNumber
+        ? account
+        : await this.anchor.pollVirtualNubans(account.id);
+
+      await this.prisma.walletAccount.update({
+        where: { userId },
+        data: {
+          anchorCustomerId,
+          anchorAccountId: account.id,
+          virtualAccountNo: nuban?.accountNumber ?? null,
+          virtualAccountName: nuban?.accountName ?? null,
+          virtualBankName: nuban?.bankName ?? null,
+          kycStatus: 'VERIFIED',
+          isActive: true,
+        },
+      });
+
+      return this.prisma.walletAccount.findUnique({ where: { userId } });
+    } catch (err) {
+      await this.prisma.walletAccount.update({
+        where: { userId },
+        data: { kycStatus: 'FAILED' },
+      });
+      throw err;
+    }
+  }
+
+  // ── Balances & transactions ────────────────────────────────────────────────
+
+  async getWallet(userId: string) {
+    const wallet = await this.prisma.walletAccount.findUnique({ where: { userId } });
+    if (wallet) return wallet;
+    // Auto-provision for users who registered before the wallet feature
+    return this.prisma.walletAccount.create({ data: { userId } });
+  }
+
+  async getPendingEscrows(landlordId: string) {
+    // 1. Proper escrow records (created by webhook or wallet-pay)
+    const escrows = await this.prisma.paymentEscrow.findMany({
+      where: { landlordId, status: 'HOLDING' },
+      orderBy: { releaseAt: 'asc' },
+      select: {
+        id: true,
+        amount: true,
+        netAmount: true,
+        commission: true,
+        type: true,
+        releaseAt: true,
+        bookingId: true,
+        rentalPaymentId: true,
+        createdAt: true,
+      },
+    });
+
+    // 2. Paid bookings that have no escrow record yet (e.g. webhook didn't fire locally)
+    const bookingsWithoutEscrow = await this.prisma.booking.findMany({
+      where: {
+        listing: { landlordId },
+        paymentStatus: 'PAID',
+        escrow: null,
+      },
+      select: {
+        id: true,
+        totalPrice: true,
+        checkIn: true,
+        paidAt: true,
+        createdAt: true,
+      },
+    });
+
+    // 3. Paid rental payments that have no escrow record yet
+    const rentalsWithoutEscrow = await this.prisma.rentalPayment.findMany({
+      where: {
+        listing: { landlordId },
+        status: 'PAID',
+        escrow: null,
+      },
+      select: {
+        id: true,
+        amount: true,
+        paidAt: true,
+        createdAt: true,
+      },
+    });
+
+    // Synthesise missing escrows so the frontend gets a uniform shape
+    const syntheticFromBookings = bookingsWithoutEscrow.map((b) => {
+      const commission = Math.round(b.totalPrice * COMMISSION_RATE * 100) / 100;
+      const releaseAt = new Date(
+        (b.paidAt ?? b.createdAt).getTime() +
+          Math.max(SHORTLET_HOLD_HOURS, Math.ceil((new Date(b.checkIn).getTime() - Date.now()) / 3_600_000) + SHORTLET_HOLD_HOURS) * 3_600_000,
+      );
+      return {
+        id: `booking-${b.id}`,
+        amount: b.totalPrice,
+        netAmount: b.totalPrice - commission,
+        commission,
+        type: 'SHORTLET_BOOKING' as const,
+        releaseAt,
+        bookingId: b.id,
+        rentalPaymentId: null,
+        createdAt: b.createdAt,
+      };
+    });
+
+    const syntheticFromRentals = rentalsWithoutEscrow.map((r) => {
+      const commission = Math.round(r.amount * COMMISSION_RATE * 100) / 100;
+      const releaseAt = new Date(
+        (r.paidAt ?? r.createdAt).getTime() + RENTAL_HOLD_HOURS * 3_600_000,
+      );
+      return {
+        id: `rental-${r.id}`,
+        amount: r.amount,
+        netAmount: r.amount - commission,
+        commission,
+        type: 'RENTAL_PAYMENT' as const,
+        releaseAt,
+        bookingId: null,
+        rentalPaymentId: r.id,
+        createdAt: r.createdAt,
+      };
+    });
+
+    return [...escrows, ...syntheticFromBookings, ...syntheticFromRentals].sort(
+      (a, b) => new Date(a.releaseAt).getTime() - new Date(b.releaseAt).getTime(),
+    );
+  }
+
+  async getTransactions(userId: string, limit = 30) {
+    return this.prisma.walletTransaction.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+    });
+  }
+
+  // ── Internal ledger helpers ────────────────────────────────────────────────
+
+  async creditWallet(
+    userId: string,
+    amountNGN: number,
+    description: string,
+    opts?: {
+      type?: 'CREDIT' | 'ESCROW_RELEASE' | 'REFUND';
+      bookingId?: string;
+      rentalPaymentId?: string;
+      escrowId?: string;
+      reference?: string;
+    },
+  ) {
+    const wallet = await this.prisma.walletAccount.findUnique({ where: { userId } });
+    if (!wallet) throw new NotFoundException('Wallet not found');
+
+    const newBalance = wallet.availableBalance + amountNGN;
+
+    await this.prisma.$transaction([
+      this.prisma.walletAccount.update({
+        where: { userId },
+        data: { availableBalance: newBalance },
+      }),
+      this.prisma.walletTransaction.create({
+        data: {
+          userId,
+          walletAccountId: wallet.id,
+          type: opts?.type ?? 'CREDIT',
+          amount: amountNGN,
+          balanceAfter: newBalance,
+          description,
+          reference: opts?.reference ?? randomUUID(),
+          bookingId: opts?.bookingId,
+          rentalPaymentId: opts?.rentalPaymentId,
+          escrowId: opts?.escrowId,
+        },
+      }),
+    ]);
+  }
+
+  async debitWallet(
+    userId: string,
+    amountNGN: number,
+    description: string,
+    opts?: {
+      type?: 'DEBIT' | 'ESCROW_HOLD' | 'WITHDRAWAL' | 'COMMISSION';
+      bookingId?: string;
+      rentalPaymentId?: string;
+      escrowId?: string;
+      reference?: string;
+    },
+  ) {
+    const wallet = await this.prisma.walletAccount.findUnique({ where: { userId } });
+    if (!wallet) throw new NotFoundException('Wallet not found');
+    if (wallet.availableBalance < amountNGN)
+      throw new BadRequestException('Insufficient wallet balance');
+
+    const newBalance = wallet.availableBalance - amountNGN;
+
+    await this.prisma.$transaction([
+      this.prisma.walletAccount.update({
+        where: { userId },
+        data: { availableBalance: newBalance },
+      }),
+      this.prisma.walletTransaction.create({
+        data: {
+          userId,
+          walletAccountId: wallet.id,
+          type: opts?.type ?? 'DEBIT',
+          amount: amountNGN,
+          balanceAfter: newBalance,
+          description,
+          reference: opts?.reference ?? randomUUID(),
+          bookingId: opts?.bookingId,
+          rentalPaymentId: opts?.rentalPaymentId,
+          escrowId: opts?.escrowId,
+        },
+      }),
+    ]);
+  }
+
+  // ── Escrow ────────────────────────────────────────────────────────────────
+
+  /**
+   * Create an escrow hold after card payment (Paystack).
+   * Debits tenant's pending balance (no actual debit — money is in Leadsage master Anchor).
+   * Schedules automatic release to landlord after hold period.
+   */
+  async createEscrowFromCard(params: {
+    payerId: string;
+    landlordId: string;
+    amountNGN: number;
+    type: 'SHORTLET_BOOKING' | 'RENTAL_PAYMENT';
+    bookingId?: string;
+    rentalPaymentId?: string;
+    paystackRef?: string;
+    releaseHoursFromNow?: number;
+  }): Promise<string> {
+    const commission = Math.round(params.amountNGN * COMMISSION_RATE * 100) / 100;
+    const netAmount = params.amountNGN - commission;
+    const releaseAt = new Date(
+      Date.now() + (params.releaseHoursFromNow ?? RENTAL_HOLD_HOURS) * 60 * 60 * 1000,
+    );
+
+    const escrow = await this.prisma.paymentEscrow.create({
+      data: {
+        payerId: params.payerId,
+        landlordId: params.landlordId,
+        amount: params.amountNGN,
+        commission,
+        netAmount,
+        type: params.type,
+        bookingId: params.bookingId,
+        rentalPaymentId: params.rentalPaymentId,
+        releaseAt,
+        fundedByCard: true,
+        paystackRef: params.paystackRef,
+        status: 'HOLDING',
+      },
+    });
+
+    return escrow.id;
+  }
+
+  /**
+   * Create an escrow hold when tenant pays from their wallet.
+   * Actually debits the tenant's wallet balance immediately.
+   */
+  async createEscrowFromWallet(params: {
+    payerId: string;
+    landlordId: string;
+    amountNGN: number;
+    type: 'SHORTLET_BOOKING' | 'RENTAL_PAYMENT';
+    bookingId?: string;
+    rentalPaymentId?: string;
+    releaseHoursFromNow?: number;
+  }): Promise<string> {
+    const commission = Math.round(params.amountNGN * COMMISSION_RATE * 100) / 100;
+    const netAmount = params.amountNGN - commission;
+    const releaseAt = new Date(
+      Date.now() + (params.releaseHoursFromNow ?? RENTAL_HOLD_HOURS) * 60 * 60 * 1000,
+    );
+
+    // Debit tenant's wallet
+    await this.debitWallet(
+      params.payerId,
+      params.amountNGN,
+      `Payment held in escrow${params.bookingId ? ` for booking` : ' for rent'}`,
+      {
+        type: 'ESCROW_HOLD',
+        bookingId: params.bookingId,
+        rentalPaymentId: params.rentalPaymentId,
+      },
+    );
+
+    const escrow = await this.prisma.paymentEscrow.create({
+      data: {
+        payerId: params.payerId,
+        landlordId: params.landlordId,
+        amount: params.amountNGN,
+        commission,
+        netAmount,
+        type: params.type,
+        bookingId: params.bookingId,
+        rentalPaymentId: params.rentalPaymentId,
+        releaseAt,
+        fundedByWallet: true,
+        status: 'HOLDING',
+      },
+    });
+
+    return escrow.id;
+  }
+
+  /**
+   * Release an escrow — credits landlord wallet (net amount) and records commission.
+   * Called by the cron job.
+   */
+  async releaseEscrow(escrowId: string): Promise<void> {
+    const escrow = await this.prisma.paymentEscrow.findUnique({
+      where: { id: escrowId },
+    });
+    if (!escrow || escrow.status !== 'HOLDING') return;
+
+    await this.prisma.paymentEscrow.update({
+      where: { id: escrowId },
+      data: { status: 'RELEASED', releasedAt: new Date() },
+    });
+
+    await this.creditWallet(
+      escrow.landlordId,
+      escrow.netAmount,
+      `Payment released from escrow`,
+      { type: 'ESCROW_RELEASE', escrowId },
+    );
+
+    this.logger.log(`Escrow ${escrowId} released — ₦${escrow.netAmount} to landlord ${escrow.landlordId}`);
+  }
+
+  /**
+   * Refund an escrow back to the payer (e.g. cancelled booking).
+   */
+  async refundEscrow(escrowId: string): Promise<void> {
+    const escrow = await this.prisma.paymentEscrow.findUnique({
+      where: { id: escrowId },
+    });
+    if (!escrow || escrow.status !== 'HOLDING') return;
+
+    await this.prisma.paymentEscrow.update({
+      where: { id: escrowId },
+      data: { status: 'REFUNDED' },
+    });
+
+    if (escrow.fundedByWallet) {
+      // Refund straight back to tenant wallet
+      await this.creditWallet(
+        escrow.payerId,
+        escrow.amount,
+        'Refund from cancelled booking',
+        { type: 'REFUND', escrowId },
+      );
+    }
+    // If funded by card — Paystack refund is handled separately via PaystackService
+  }
+
+  // ── Wallet-pay for rent ────────────────────────────────────────────────────
+
+  async payRentFromWallet(userId: string, rentalPaymentId: string) {
+    const payment = await this.prisma.rentalPayment.findFirst({
+      where: { id: rentalPaymentId, userId },
+      include: {
+        listing: { select: { title: true, landlordId: true } },
+      },
+    });
+    if (!payment) throw new NotFoundException('Payment not found');
+    if (payment.status === 'PAID') throw new BadRequestException('Already paid');
+
+    const escrowId = await this.createEscrowFromWallet({
+      payerId: userId,
+      landlordId: payment.listing.landlordId,
+      amountNGN: payment.amount,
+      type: 'RENTAL_PAYMENT',
+      rentalPaymentId,
+      releaseHoursFromNow: RENTAL_HOLD_HOURS,
+    });
+
+    await this.prisma.rentalPayment.update({
+      where: { id: rentalPaymentId },
+      data: { status: 'PAID', paidAt: new Date() },
+    });
+
+    return { escrowId, message: 'Payment held — will be released to landlord within 24 hours' };
+  }
+
+  // ── Wallet-pay for shortlet booking ───────────────────────────────────────
+
+  async payBookingFromWallet(userId: string, bookingId: string) {
+    const booking = await this.prisma.booking.findFirst({
+      where: { id: bookingId, userId },
+      include: {
+        listing: { select: { title: true, landlordId: true, instantBook: true } },
+      },
+    });
+    if (!booking) throw new NotFoundException('Booking not found');
+    if (booking.paymentStatus === 'PAID') throw new BadRequestException('Already paid');
+
+    const escrowId = await this.createEscrowFromWallet({
+      payerId: userId,
+      landlordId: booking.listing.landlordId,
+      amountNGN: booking.totalPrice,
+      type: 'SHORTLET_BOOKING',
+      bookingId,
+      // Release 24h after check-in, not immediately
+      releaseHoursFromNow:
+        Math.max(
+          SHORTLET_HOLD_HOURS,
+          Math.ceil((new Date(booking.checkIn).getTime() - Date.now()) / 3_600_000) +
+            SHORTLET_HOLD_HOURS,
+        ),
+    });
+
+    const newStatus = booking.listing.instantBook ? 'CONFIRMED' : 'PENDING';
+    await this.prisma.booking.update({
+      where: { id: bookingId },
+      data: {
+        paymentStatus: 'PAID',
+        paidAt: new Date(),
+        status: newStatus,
+        ...(booking.listing.instantBook ? { confirmedAt: new Date() } : {}),
+      },
+    });
+
+    return { escrowId, status: newStatus };
+  }
+
+  // ── Withdrawal ────────────────────────────────────────────────────────────
+
+  async requestWithdrawal(
+    userId: string,
+    amountNGN: number,
+    bankAccountNumber: string,
+    bankCode: string,
+    bankAccountName: string,
+  ) {
+    const wallet = await this.prisma.walletAccount.findUnique({ where: { userId } });
+    if (!wallet) throw new NotFoundException('Wallet not found');
+    if (!wallet.isActive) throw new BadRequestException('Complete KYC before withdrawing');
+    if (wallet.availableBalance < amountNGN)
+      throw new BadRequestException('Insufficient balance');
+
+    // Debit locally first
+    await this.debitWallet(userId, amountNGN, `Withdrawal to ${bankAccountName}`, {
+      type: 'WITHDRAWAL',
+    });
+
+    // Initiate NIP transfer from master Anchor account
+    const masterAccountId = process.env.ANCHOR_MASTER_ACCOUNT_ID ?? '';
+    if (!masterAccountId) {
+      this.logger.warn('ANCHOR_MASTER_ACCOUNT_ID not set — withdrawal queued without transfer');
+      return { message: 'Withdrawal queued (master account not configured)' };
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { firstName: true, lastName: true },
+    });
+
+    const counterpartyId = await this.anchor.createCounterparty({
+      bankCode,
+      accountNumber: bankAccountNumber,
+      accountName: bankAccountName,
+    });
+
+    await this.anchor.initiateTransfer({
+      accountId: masterAccountId,
+      counterpartyId,
+      amountNaira: amountNGN,
+      reference: randomUUID(),
+      reason: `Leadsage withdrawal — ${user?.firstName} ${user?.lastName}`,
+    });
+
+    return { message: `₦${amountNGN.toLocaleString()} sent to ${bankAccountName}` };
+  }
+
+  // ── Bank account verification ──────────────────────────────────────────────
+
+  async verifyBankAccount(accountNumber: string, bankCode: string) {
+    try {
+      const result = await this.anchor.verifyAccount(bankCode, accountNumber);
+      const name = result?.data?.attributes?.accountName ?? result?.accountName;
+      if (!name) throw new Error('No account name returned');
+      return { accountName: name };
+    } catch {
+      throw new BadRequestException('Could not verify account — check number and bank');
+    }
+  }
+}

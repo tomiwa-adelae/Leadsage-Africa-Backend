@@ -78,6 +78,9 @@ model User {
   tourRequests  TourRequest[]  @relation("TourUser")
   agentTours    TourRequest[]  @relation("TourAgent")
   rentalPayments RentalPayment[] @relation("RentalPaymentUser")
+  wallet        WalletAccount?
+  walletTxs     WalletTransaction[]
+  escrowsAsLandlord PaymentEscrow[] @relation("EscrowLandlord")
 }
 
 enum AdminPosition {
@@ -280,6 +283,7 @@ model RentalPayment {
   agreement       RentalAgreement?    @relation(fields: [agreementId], references: [id])
   user            User                @relation("RentalPaymentUser", fields: [userId], references: [id])
   listing         Listing             @relation(fields: [listingId], references: [id])
+  escrow          PaymentEscrow?
 }
 
 enum RentalPaymentStatus {
@@ -336,6 +340,7 @@ model Booking {
 
   user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   listing Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  escrow  PaymentEscrow?
 }
 
 enum BookingStatus {
@@ -483,10 +488,130 @@ enum ListingStatus {
   PUBLISHED
   REJECTED
   ARCHIVED
+  OCCUPIED
 }
 
 enum AccountStatus {
   ACTIVE
   SUSPENDED
   BANNED
+}
+
+// ── Wallet ─────────────────────────────────────────────────────────────────────
+
+model WalletAccount {
+  id     String @id @default(uuid())
+  userId String @unique
+
+  // Anchor identifiers
+  anchorCustomerId String?
+  anchorAccountId  String? @unique
+  virtualAccountNo   String? // NUBAN shown to user
+  virtualAccountName String? // account name as returned by Anchor
+  virtualBankName    String? // e.g. "Wema Bank"
+
+  // KYC
+  kycStatus   WalletKycStatus @default(PENDING)
+  bvn         String?
+  dateOfBirth String? // stored as YYYY-MM-DD
+  gender      String?
+
+  // Balances (in NGN, mirrored from Anchor)
+  availableBalance Float @default(0)
+  pendingBalance   Float @default(0) // held in escrow
+
+  isActive  Boolean  @default(false) // activated after KYC
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user         User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions WalletTransaction[]
+}
+
+model WalletTransaction {
+  id              String @id @default(uuid())
+  userId          String
+  walletAccountId String?
+
+  type         WalletTxType
+  amount       Float
+  balanceAfter Float
+  description  String
+  reference    String? @unique // Anchor or internal ref
+  anchorRef    String?
+
+  // What triggered this tx
+  bookingId       String?
+  rentalPaymentId String?
+  escrowId        String?
+
+  createdAt DateTime @default(now())
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  walletAccount WalletAccount? @relation(fields: [walletAccountId], references: [id])
+  escrow        PaymentEscrow? @relation(fields: [escrowId], references: [id])
+}
+
+model PaymentEscrow {
+  id String @id @default(uuid())
+
+  // Who is involved
+  payerId    String  // tenant / guest
+  landlordId String  // who receives after hold
+
+  amount       Float
+  commission   Float  // 5% Leadsage fee
+  netAmount    Float  // amount - commission
+
+  // What is this for
+  type        EscrowType
+  bookingId      String? @unique
+  rentalPaymentId String? @unique
+
+  // Timing
+  releaseAt DateTime // when to release to landlord
+  releasedAt DateTime?
+  status    EscrowStatus @default(HOLDING)
+
+  // Funding source
+  fundedByCard   Boolean @default(false)
+  fundedByWallet Boolean @default(false)
+  paystackRef    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  landlord      User                @relation("EscrowLandlord", fields: [landlordId], references: [id])
+  booking       Booking?            @relation(fields: [bookingId], references: [id])
+  rentalPayment RentalPayment?      @relation(fields: [rentalPaymentId], references: [id])
+  transactions  WalletTransaction[]
+}
+
+enum WalletKycStatus {
+  PENDING
+  SUBMITTED
+  VERIFIED
+  FAILED
+}
+
+enum WalletTxType {
+  CREDIT         // money came in (bank transfer, card payment redistributed)
+  DEBIT          // money went out (payment, withdrawal)
+  ESCROW_HOLD    // money moved to escrow (landlord pending)
+  ESCROW_RELEASE // escrow released to available
+  WITHDRAWAL     // NIP transfer out to bank
+  COMMISSION     // 5% deducted
+  REFUND         // money returned
+}
+
+enum EscrowType {
+  SHORTLET_BOOKING
+  RENTAL_PAYMENT
+}
+
+enum EscrowStatus {
+  HOLDING
+  RELEASED
+  REFUNDED
+  CANCELLED
 }

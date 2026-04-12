@@ -13,6 +13,7 @@ import slugify from 'slugify';
 import { OAuth2Client } from 'google-auth-library';
 import { UserResponseDto } from './dto/user-response.dto';
 import { PrismaService } from 'src/prisma/prisma.service';
+import { WalletService } from 'src/wallet/wallet.service';
 import { notDeleted } from 'src/utils/prismaFilters';
 import { RegisterUserDto } from './dto/register-user.dto';
 import { WelcomeEmail } from 'emails/welcome-email';
@@ -45,6 +46,7 @@ export class AuthService {
     private prisma: PrismaService,
     private jwtService: JwtService,
     private mail: MailService,
+    private wallet: WalletService,
   ) {}
 
   getAcronym(name?: string) {
@@ -196,6 +198,9 @@ export class AuthService {
         role,
       },
     });
+
+    // Provision wallet (locked until KYC)
+    await this.wallet.provisionWallet(user.id).catch(() => {});
 
     // Welcome email → new user
     await this.mail.sendMail({

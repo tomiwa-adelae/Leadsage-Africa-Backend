@@ -11,12 +11,16 @@ import { LandlordModule } from './landlord/landlord.module';
 import { PaystackModule } from './paystack/paystack.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
 import { TasksModule } from './tasks/tasks.module';
+import { AnchorModule } from './anchor/anchor.module';
+import { WalletModule } from './wallet/wallet.module';
 
 @Module({
   imports: [
     PrismaModule,
     MailModule,
     PaystackModule,
+    AnchorModule,
+    WalletModule,
     AuthModule,
     ListingsModule,
     AdminModule,

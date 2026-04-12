@@ -98,6 +98,15 @@ export class UserController {
     return this.userService.getBookingByReference(user.id, ref);
   }
 
+  @Post('bookings/:id/pay')
+  @HttpCode(HttpStatus.OK)
+  initiateBookingPayment(
+    @CurrentUser() user: { id: string },
+    @Param('id') id: string,
+  ) {
+    return this.userService.initiateBookingPayment(user.id, id);
+  }
+
   @Post('bookings/verify-payment/:ref')
   @HttpCode(HttpStatus.OK)
   verifyBookingPayment(
