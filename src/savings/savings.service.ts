@@ -1,0 +1,682 @@
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  BadRequestException,
+} from '@nestjs/common';
+import { PrismaService } from 'src/prisma/prisma.service';
+import { AnchorService } from 'src/anchor/anchor.service';
+import { WalletService } from 'src/wallet/wallet.service';
+import { PaystackService } from 'src/paystack/paystack.service';
+import { CreateSavingsDto } from './dto/create-savings.dto';
+import { UpdateSavingsDto } from './dto/update-savings.dto';
+import { Prisma } from '@prisma/client';
+type FirstKeySavings = Prisma.FirstKeySavingsGetPayload<object>;
+type SavingsStatus = 'ACTIVE' | 'PAUSED' | 'MATURED' | 'WITHDRAWN' | 'BROKEN';
+type SavingsTxType = 'DEPOSIT' | 'INTEREST' | 'WITHDRAWAL' | 'PENALTY' | 'REFUND';
+import { addDays, addMonths, addYears, differenceInDays } from 'date-fns';
+import { randomUUID } from 'crypto';
+
+// 12% p.a. compounded daily
+const ANNUAL_INTEREST_RATE = 0.12;
+const DAILY_INTEREST_RATE = ANNUAL_INTEREST_RATE / 365;
+
+@Injectable()
+export class SavingsService {
+  private readonly logger = new Logger(SavingsService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly anchor: AnchorService,
+    private readonly wallet: WalletService,
+    private readonly paystack: PaystackService,
+  ) {}
+
+  // ── Create Plan ─────────────────────────────────────────────────────────────
+
+  async createPlan(userId: string, dto: CreateSavingsDto): Promise<FirstKeySavings> {
+    const startDate = new Date();
+    const endDate = this.computeEndDate(dto.duration, dto.expectedGradYear, startDate);
+    const nextContributionAt = this.computeNextContribution(dto.frequency, dto.preferredDay, startDate);
+
+    // Provision a dedicated Anchor virtual account for this savings plan
+    let anchorAccountId: string | undefined;
+    let nuban: string | undefined;
+    let bankName: string | undefined;
+    let accountName: string | undefined;
+
+    try {
+      const user = await this.prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          firstName: true, lastName: true,
+          email: true, phoneNumber: true,
+          wallet: { select: { anchorCustomerId: true } },
+        },
+      });
+
+      // Anchor requires a BVN-verified customer to create SAVINGS accounts.
+      // Only use the wallet's anchorCustomerId (set after wallet KYC).
+      const customerId = user?.wallet?.anchorCustomerId ?? null;
+
+      if (customerId) {
+        const acct = await this.anchor.createDepositAccount(customerId);
+        if (acct?.id) {
+          anchorAccountId = acct.id;
+          // Anchor assigns NUBANs asynchronously — poll to get it
+          const nubanData = await this.anchor.pollVirtualNubans(acct.id);
+          nuban = nubanData?.accountNumber ?? acct.accountNumber ?? undefined;
+          bankName = nubanData?.bankName ?? acct.bankName ?? undefined;
+          accountName = nubanData?.accountName ?? acct.accountName ?? undefined;
+        }
+      }
+    } catch (e) {
+      // Non-blocking — plan is still created, NUBAN can be provisioned later
+      this.logger.warn(`Could not provision Anchor account for savings: ${e}`);
+    }
+
+    return this.prisma.firstKeySavings.create({
+      data: {
+        userId,
+        academicLevel: dto.academicLevel,
+        expectedGradYear: dto.expectedGradYear,
+        duration: dto.duration,
+        contributionAmount: dto.contributionAmount,
+        frequency: dto.frequency,
+        preferredDay: dto.preferredDay,
+        preferredTime: dto.preferredTime ?? '09:00',
+        savingsTarget: dto.savingsTarget,
+        rentalLocation: dto.rentalLocation,
+        paymentMethod: dto.paymentMethod,
+        planName: dto.planName,
+        dreamHousePhoto: dto.dreamHousePhoto,
+        startDate,
+        endDate,
+        nextContributionAt,
+        anchorAccountId,
+        nuban,
+        bankName,
+        accountName,
+      },
+    });
+  }
+
+  // ── List Plans ──────────────────────────────────────────────────────────────
+
+  async getMyPlans(userId: string) {
+    const plans = await this.prisma.firstKeySavings.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return plans.map((p) => this.enrichPlan(p));
+  }
+
+  // ── Plan Detail ─────────────────────────────────────────────────────────────
+
+  async getPlanById(userId: string, id: string) {
+    const plan = await this.prisma.firstKeySavings.findFirst({
+      where: { id, userId },
+      include: {
+        transactions: {
+          orderBy: { createdAt: 'desc' },
+          take: 50,
+        },
+      },
+    });
+
+    if (!plan) throw new NotFoundException('Savings plan not found');
+    return { ...this.enrichPlan(plan), transactions: plan.transactions };
+  }
+
+  // ── Manual Deposit ──────────────────────────────────────────────────────────
+
+  async depositFromWallet(userId: string, planId: string, amount: number) {
+    const plan = await this.getPlanOrThrow(userId, planId);
+    if (plan.status !== 'ACTIVE' && plan.status !== 'PAUSED') {
+      throw new BadRequestException('Cannot deposit to a closed or matured plan');
+    }
+
+    // Debit wallet
+    const reference = `fks-dep-${randomUUID()}`;
+    await this.wallet.debitWallet(
+      userId,
+      amount,
+      `FirstKey deposit — ${plan.planName ?? 'Savings Plan'}`,
+      { type: 'DEBIT', reference },
+    );
+
+    // Record deposit + update totals
+    await this.recordDeposit(plan, amount, reference, 'Wallet deposit');
+
+    return { success: true };
+  }
+
+  // ── Provision Account (retry NUBAN for existing plans) ─────────────────────
+
+  async provisionAccount(userId: string, planId: string) {
+    const plan = await this.getPlanOrThrow(userId, planId);
+
+    // If already has a NUBAN, just poll to refresh it
+    if (plan.anchorAccountId) {
+      const nubanData = await this.anchor.pollVirtualNubans(plan.anchorAccountId);
+      if (nubanData?.accountNumber) {
+        return this.prisma.firstKeySavings.update({
+          where: { id: planId },
+          data: {
+            nuban: nubanData.accountNumber,
+            bankName: nubanData.bankName,
+            accountName: nubanData.accountName,
+          },
+        });
+      }
+      return plan; // still not ready
+    }
+
+    // No Anchor account yet — need a BVN-verified wallet customer to create a SAVINGS account
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { wallet: { select: { anchorCustomerId: true, kycStatus: true } } },
+    });
+
+    const customerId = user?.wallet?.anchorCustomerId ?? null;
+
+    if (!customerId) {
+      throw new BadRequestException(
+        'Please complete wallet KYC (BVN verification) before generating a savings account number.',
+      );
+    }
+
+    const acct = await this.anchor.createDepositAccount(customerId);
+    if (!acct?.id) throw new BadRequestException('Anchor account creation failed');
+
+    const nubanData = await this.anchor.pollVirtualNubans(acct.id);
+
+    return this.prisma.firstKeySavings.update({
+      where: { id: planId },
+      data: {
+        anchorAccountId: acct.id,
+        nuban: nubanData?.accountNumber ?? null,
+        bankName: nubanData?.bankName ?? null,
+        accountName: nubanData?.accountName ?? null,
+      },
+    });
+  }
+
+  // ── Card Deposit (Paystack) ─────────────────────────────────────────────────
+
+  async initializeCardDeposit(userId: string, planId: string, amount: number) {
+    const plan = await this.getPlanOrThrow(userId, planId);
+    if (plan.status !== 'ACTIVE' && plan.status !== 'PAUSED') {
+      throw new BadRequestException('Cannot deposit to a closed plan');
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true },
+    });
+    if (!user) throw new NotFoundException('User not found');
+
+    const reference = `fks-card-${planId.slice(0, 8)}-${Date.now()}`;
+
+    const result = await this.paystack.initializeTransaction(
+      user.email,
+      amount,
+      { savingsPlanId: planId, userId, type: 'savings_deposit' },
+      `${process.env.FRONTEND_URL}/firstkey/${planId}?verify=${reference}`,
+      reference,
+    );
+
+    return { paymentUrl: result.authorizationUrl, reference };
+  }
+
+  async verifyCardDeposit(userId: string, planId: string, reference: string) {
+    const plan = await this.getPlanOrThrow(userId, planId);
+
+    // Idempotency
+    const existing = await this.prisma.savingsTransaction.findUnique({
+      where: { reference },
+    });
+    if (existing) return { success: true, alreadyVerified: true };
+
+    const result = await this.paystack.verifyTransaction(reference);
+    if (result.status !== 'success') {
+      throw new BadRequestException('Payment not successful');
+    }
+
+    const amount = result.amount / 100;
+    await this.recordDeposit(plan, amount, reference, 'Card deposit');
+
+    await this.prisma.notification.create({
+      data: {
+        userId,
+        type: 'GENERAL',
+        title: 'FirstKey deposit received',
+        body: `₦${amount.toLocaleString()} has been added to your ${plan.planName ?? 'FirstKey savings'} via card.`,
+        data: { savingsId: planId, amount },
+      },
+    });
+
+    return { success: true, amount };
+  }
+
+  // ── Anchor Inbound (bank transfer to savings NUBAN) ─────────────────────────
+
+  async handleAnchorDeposit(
+    anchorAccountId: string,
+    amountNGN: number,
+    reference: string,
+    narration: string,
+  ) {
+    const plan = await this.prisma.firstKeySavings.findFirst({
+      where: { anchorAccountId },
+    });
+
+    if (!plan) {
+      this.logger.warn(`No savings plan for anchorAccountId ${anchorAccountId}`);
+      return;
+    }
+
+    // Idempotency
+    const existing = await this.prisma.savingsTransaction.findUnique({
+      where: { reference },
+    });
+    if (existing) return;
+
+    if (plan.status !== 'ACTIVE' && plan.status !== 'PAUSED') return;
+
+    await this.recordDeposit(plan, amountNGN, reference, narration || 'Bank transfer deposit');
+
+    // Notify user
+    await this.prisma.notification.create({
+      data: {
+        userId: plan.userId,
+        type: 'GENERAL',
+        title: 'FirstKey deposit received',
+        body: `₦${amountNGN.toLocaleString()} has been added to your ${plan.planName ?? 'FirstKey savings'} plan.`,
+        data: { savingsId: plan.id, amount: amountNGN },
+      },
+    });
+
+    this.logger.log(`FirstKey plan ${plan.id} credited ₦${amountNGN}`);
+  }
+
+  // ── Withdraw ────────────────────────────────────────────────────────────────
+
+  async withdraw(userId: string, planId: string) {
+    const plan = await this.getPlanOrThrow(userId, planId);
+
+    if (plan.status === 'WITHDRAWN' || plan.status === 'BROKEN') {
+      throw new BadRequestException('Plan already withdrawn');
+    }
+
+    const balance = plan.totalDeposited + plan.interestEarned;
+    if (balance <= 0) throw new BadRequestException('Nothing to withdraw');
+
+    const isMatured = new Date() >= new Date(plan.endDate) || plan.status === 'MATURED';
+    const daysActive = differenceInDays(new Date(), new Date(plan.startDate));
+
+    let penalty = 0;
+    let penaltyNote = '';
+
+    if (!isMatured) {
+      // Early withdrawal penalty
+      if (daysActive < 30) {
+        penalty = plan.interestEarned; // lose all interest
+        penaltyNote = 'Early withdrawal — all interest forfeited (< 30 days)';
+      } else if (daysActive < 90) {
+        penalty = plan.interestEarned * 0.5;
+        penaltyNote = 'Early withdrawal — 50% interest forfeited (30-90 days)';
+      } else {
+        penalty = plan.interestEarned * 0.25 + plan.totalDeposited * 0.02;
+        penaltyNote = 'Early withdrawal — 25% interest + 2% principal fee (> 90 days)';
+      }
+    }
+
+    const payout = balance - penalty;
+    const reference = `fks-wdraw-${planId}-${Date.now()}`;
+
+    await this.prisma.$transaction(async (tx) => {
+      // Credit user wallet
+      await this.wallet.creditWallet(
+        userId,
+        payout,
+        `FirstKey ${isMatured ? 'maturity' : 'early'} withdrawal — ${plan.planName ?? 'Savings Plan'}`,
+        { type: 'CREDIT', reference },
+      );
+
+      // Log penalty if any
+      if (penalty > 0) {
+        await tx.savingsTransaction.create({
+          data: {
+            savingsId: planId,
+            userId,
+            type: 'PENALTY',
+            amount: -penalty,
+            balance: balance - penalty,
+            reference: `${reference}-penalty`,
+            note: penaltyNote,
+            penaltyAmount: penalty,
+          },
+        });
+      }
+
+      // Log withdrawal
+      await tx.savingsTransaction.create({
+        data: {
+          savingsId: planId,
+          userId,
+          type: 'WITHDRAWAL',
+          amount: -payout,
+          balance: 0,
+          reference,
+          note: isMatured ? 'Maturity withdrawal' : 'Early withdrawal',
+        },
+      });
+
+      // Mark plan
+      await tx.firstKeySavings.update({
+        where: { id: planId },
+        data: {
+          status: isMatured ? 'WITHDRAWN' : 'BROKEN',
+          totalDeposited: 0,
+          interestEarned: 0,
+          withdrawnAt: new Date(),
+        },
+      });
+    });
+
+    await this.prisma.notification.create({
+      data: {
+        userId,
+        type: 'GENERAL',
+        title: isMatured ? 'Savings maturity withdrawal' : 'Early withdrawal processed',
+        body: isMatured
+          ? `₦${payout.toLocaleString()} has been credited to your wallet from your FirstKey savings.`
+          : `₦${payout.toLocaleString()} has been credited to your wallet. A penalty of ₦${penalty.toLocaleString()} was applied.`,
+        data: { savingsId: planId },
+      },
+    });
+
+    return { payout, penalty, isMatured };
+  }
+
+  // ── Update Settings ─────────────────────────────────────────────────────────
+
+  async updateSettings(userId: string, planId: string, dto: UpdateSavingsDto) {
+    const plan = await this.getPlanOrThrow(userId, planId);
+
+    if (plan.status === 'WITHDRAWN' || plan.status === 'BROKEN' || plan.status === 'MATURED') {
+      throw new BadRequestException('Cannot update a closed plan');
+    }
+
+    let nextContributionAt = plan.nextContributionAt;
+    if (dto.frequency || dto.preferredDay) {
+      nextContributionAt = this.computeNextContribution(
+        dto.frequency ?? plan.frequency,
+        dto.preferredDay ?? plan.preferredDay ?? undefined,
+        new Date(),
+      );
+    }
+
+    return this.prisma.firstKeySavings.update({
+      where: { id: planId },
+      data: {
+        ...dto,
+        nextContributionAt,
+      },
+    });
+  }
+
+  // ── Pause / Resume ──────────────────────────────────────────────────────────
+
+  async pause(userId: string, planId: string) {
+    const plan = await this.getPlanOrThrow(userId, planId);
+    if (plan.status !== 'ACTIVE') throw new BadRequestException('Plan is not active');
+    return this.prisma.firstKeySavings.update({
+      where: { id: planId },
+      data: { status: 'PAUSED' },
+    });
+  }
+
+  async resume(userId: string, planId: string) {
+    const plan = await this.getPlanOrThrow(userId, planId);
+    if (plan.status !== 'PAUSED') throw new BadRequestException('Plan is not paused');
+    return this.prisma.firstKeySavings.update({
+      where: { id: planId },
+      data: { status: 'ACTIVE' },
+    });
+  }
+
+  // ── Cron: Daily Interest ────────────────────────────────────────────────────
+
+  async applyDailyInterest() {
+    const plans = await this.prisma.firstKeySavings.findMany({
+      where: { status: 'ACTIVE' },
+    });
+
+    let count = 0;
+    for (const plan of plans) {
+      const principal = plan.totalDeposited + plan.interestEarned;
+      if (principal <= 0) continue;
+
+      const interest = +(principal * DAILY_INTEREST_RATE).toFixed(2);
+      if (interest <= 0) continue;
+
+      const reference = `fks-int-${plan.id}-${new Date().toISOString().slice(0, 10)}`;
+
+      // Skip if already applied today
+      const exists = await this.prisma.savingsTransaction.findUnique({
+        where: { reference },
+      });
+      if (exists) continue;
+
+      await this.prisma.$transaction([
+        this.prisma.savingsTransaction.create({
+          data: {
+            savingsId: plan.id,
+            userId: plan.userId,
+            type: 'INTEREST',
+            amount: interest,
+            balance: plan.totalDeposited + plan.interestEarned + interest,
+            reference,
+            note: `Daily interest (${(ANNUAL_INTEREST_RATE * 100).toFixed(0)}% p.a.)`,
+          },
+        }),
+        this.prisma.firstKeySavings.update({
+          where: { id: plan.id },
+          data: {
+            interestEarned: { increment: interest },
+            lastInterestAt: new Date(),
+          },
+        }),
+      ]);
+
+      count++;
+    }
+
+    this.logger.log(`Daily interest applied to ${count} savings plans`);
+  }
+
+  // ── Cron: Auto-contributions ────────────────────────────────────────────────
+
+  async processScheduledContributions() {
+    const now = new Date();
+    const plans = await this.prisma.firstKeySavings.findMany({
+      where: {
+        status: 'ACTIVE',
+        paymentMethod: 'WALLET',
+        nextContributionAt: { lte: now },
+      },
+    });
+
+    for (const plan of plans) {
+      try {
+        // Check wallet balance
+        const walletAccount = await this.prisma.walletAccount.findUnique({
+          where: { userId: plan.userId },
+        });
+
+        if (!walletAccount || walletAccount.availableBalance < plan.contributionAmount) {
+          // Notify insufficient balance
+          await this.prisma.notification.create({
+            data: {
+              userId: plan.userId,
+              type: 'GENERAL',
+              title: 'FirstKey auto-save failed',
+              body: `Insufficient wallet balance for your FirstKey contribution of ₦${plan.contributionAmount.toLocaleString()}. Please fund your wallet.`,
+              data: { savingsId: plan.id },
+            },
+          });
+          continue;
+        }
+
+        const reference = `fks-auto-${plan.id}-${now.getTime()}`;
+        await this.wallet.debitWallet(
+          plan.userId,
+          plan.contributionAmount,
+          `FirstKey auto-save — ${plan.planName ?? 'Savings Plan'}`,
+          { type: 'DEBIT', reference },
+        );
+
+        await this.recordDeposit(plan, plan.contributionAmount, reference, 'Auto-save contribution');
+      } catch (e) {
+        this.logger.error(`Auto-contribution failed for plan ${plan.id}: ${e}`);
+      }
+    }
+
+    this.logger.log(`Processed ${plans.length} scheduled contributions`);
+  }
+
+  // ── Cron: Mature Plans ──────────────────────────────────────────────────────
+
+  async maturePlans() {
+    const now = new Date();
+    const plans = await this.prisma.firstKeySavings.findMany({
+      where: { status: 'ACTIVE', endDate: { lte: now } },
+    });
+
+    for (const plan of plans) {
+      await this.prisma.firstKeySavings.update({
+        where: { id: plan.id },
+        data: { status: 'MATURED', maturedAt: now },
+      });
+
+      const balance = plan.totalDeposited + plan.interestEarned;
+      await this.prisma.notification.create({
+        data: {
+          userId: plan.userId,
+          type: 'GENERAL',
+          title: 'Your FirstKey savings have matured!',
+          body: `Congratulations! Your ${plan.planName ?? 'FirstKey savings'} (₦${balance.toLocaleString()}) are ready for withdrawal.`,
+          data: { savingsId: plan.id },
+        },
+      });
+    }
+
+    if (plans.length) this.logger.log(`Matured ${plans.length} savings plans`);
+  }
+
+  // ── Private Helpers ─────────────────────────────────────────────────────────
+
+  private async getPlanOrThrow(userId: string, planId: string): Promise<FirstKeySavings> {
+    const plan = await this.prisma.firstKeySavings.findFirst({
+      where: { id: planId, userId },
+    });
+    if (!plan) throw new NotFoundException('Savings plan not found');
+    return plan;
+  }
+
+  private async recordDeposit(
+    plan: FirstKeySavings,
+    amount: number,
+    reference: string,
+    note: string,
+  ) {
+    const newBalance = plan.totalDeposited + amount;
+    const nextContributionAt = plan.paymentMethod === 'WALLET'
+      ? this.computeNextContribution(plan.frequency, plan.preferredDay ?? undefined, new Date())
+      : plan.nextContributionAt;
+
+    try {
+      await this.prisma.$transaction([
+        this.prisma.savingsTransaction.create({
+          data: {
+            savingsId: plan.id,
+            userId: plan.userId,
+            type: 'DEPOSIT',
+            amount,
+            balance: newBalance,
+            reference,
+            note,
+          },
+        }),
+        this.prisma.firstKeySavings.update({
+          where: { id: plan.id },
+          data: {
+            totalDeposited: { increment: amount },
+            lastContributionAt: new Date(),
+            nextContributionAt,
+            status: plan.status === 'PAUSED' ? 'PAUSED' : 'ACTIVE',
+          },
+        }),
+      ]);
+    } catch (e: any) {
+      if (e?.code === 'P2002') return; // duplicate reference — already recorded
+      throw e;
+    }
+  }
+
+  private computeEndDate(
+    duration: string,
+    expectedGradYear: number,
+    from: Date,
+  ): Date {
+    if (duration === 'ONE_YEAR') return addYears(from, 1);
+    if (duration === 'TWO_YEARS') return addYears(from, 2);
+    // UNTIL_GRADUATION — end of expected grad year (July, typical Nigerian academic calendar)
+    return new Date(expectedGradYear, 6, 31); // July 31
+  }
+
+  private computeNextContribution(
+    frequency: string,
+    preferredDay: number | undefined,
+    from: Date,
+  ): Date {
+    const next = new Date(from);
+    if (frequency === 'DAILY') {
+      return addDays(next, 1);
+    }
+    if (frequency === 'WEEKLY') {
+      // preferredDay: 1=Mon ... 7=Sun (ISO)
+      const targetDay = preferredDay ?? 1;
+      const current = next.getDay() || 7; // convert 0=Sun to 7
+      const daysUntil = ((targetDay - current + 7) % 7) || 7;
+      return addDays(next, daysUntil);
+    }
+    if (frequency === 'MONTHLY') {
+      const nextMonth = addMonths(next, 1);
+      nextMonth.setDate(Math.min(preferredDay ?? 1, 28));
+      return nextMonth;
+    }
+    // CUSTOM — default to monthly
+    return addMonths(next, 1);
+  }
+
+  private enrichPlan(plan: FirstKeySavings) {
+    const balance = plan.totalDeposited + plan.interestEarned;
+    const progressPct = plan.savingsTarget
+      ? Math.min(100, (balance / plan.savingsTarget) * 100)
+      : null;
+    const isMatured = new Date() >= new Date(plan.endDate);
+    const daysRemaining = Math.max(0, differenceInDays(new Date(plan.endDate), new Date()));
+
+    return {
+      ...plan,
+      balance,
+      progressPct,
+      isMatured,
+      daysRemaining,
+    };
+  }
+}

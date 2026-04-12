@@ -13,6 +13,7 @@ import { WebhooksModule } from './webhooks/webhooks.module';
 import { TasksModule } from './tasks/tasks.module';
 import { AnchorModule } from './anchor/anchor.module';
 import { WalletModule } from './wallet/wallet.module';
+import { SavingsModule } from './savings/savings.module';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { WalletModule } from './wallet/wallet.module';
     PaystackModule,
     AnchorModule,
     WalletModule,
+    SavingsModule,
     AuthModule,
     ListingsModule,
     AdminModule,

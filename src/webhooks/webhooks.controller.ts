@@ -13,6 +13,7 @@ import { createHmac } from 'crypto';
 import { PaystackService } from 'src/paystack/paystack.service';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { WalletService } from 'src/wallet/wallet.service';
+import { SavingsService } from 'src/savings/savings.service';
 
 @Controller('webhooks')
 export class WebhooksController {
@@ -22,6 +23,7 @@ export class WebhooksController {
     private readonly paystack: PaystackService,
     private readonly prisma: PrismaService,
     private readonly wallet: WalletService,
+    private readonly savings: SavingsService,
   ) {}
 
   // ── Anchor webhook ─────────────────────────────────────────────────────────
@@ -119,26 +121,38 @@ export class WebhooksController {
       return;
     }
 
+    // Idempotency key — prefer Anchor's own transaction/event ID
+    const anchorRef: string = data?.id ?? attrs?.reference ?? attrs?.sessionId ?? '';
+    const reference = `anchor-${anchorRef || Date.now()}`;
+
+    const narration: string =
+      attrs?.narration ?? attrs?.description ?? attrs?.remark ?? 'Bank transfer received';
+
+    // ── Check if this is a savings plan account ────────────────────────────
+    const savingsPlan = await this.prisma.firstKeySavings.findFirst({
+      where: { anchorAccountId },
+    });
+
+    if (savingsPlan) {
+      await this.savings.handleAnchorDeposit(anchorAccountId, amountNGN, reference, narration)
+        .catch((e) => this.logger.error(`Savings deposit handler error: ${e}`));
+      return;
+    }
+
+    // ── Otherwise credit the main wallet ──────────────────────────────────
     const wallet = await this.prisma.walletAccount.findUnique({
       where: { anchorAccountId },
     });
 
     if (!wallet) {
-      this.logger.warn(`Anchor inbound: no wallet for accountId ${anchorAccountId}`);
+      this.logger.warn(`Anchor inbound: no wallet or savings plan for accountId ${anchorAccountId}`);
       return;
     }
-
-    // Idempotency key — prefer Anchor's own transaction/event ID
-    const anchorRef: string = data?.id ?? attrs?.reference ?? attrs?.sessionId ?? '';
-    const reference = `anchor-${anchorRef || Date.now()}`;
 
     const existing = await this.prisma.walletTransaction.findUnique({
       where: { reference },
     });
     if (existing) return;
-
-    const narration: string =
-      attrs?.narration ?? attrs?.description ?? attrs?.remark ?? 'Bank transfer received';
 
     await this.wallet.creditWallet(
       wallet.userId,
@@ -147,7 +161,6 @@ export class WebhooksController {
       { type: 'CREDIT', reference },
     );
 
-    // Notify user
     await this.prisma.notification.create({
       data: {
         userId: wallet.userId,
@@ -158,9 +171,7 @@ export class WebhooksController {
       },
     });
 
-    this.logger.log(
-      `Wallet credited: ₦${amountNGN} → user ${wallet.userId}`,
-    );
+    this.logger.log(`Wallet credited: ₦${amountNGN} → user ${wallet.userId}`);
   }
 
   // ── Paystack webhook ───────────────────────────────────────────────────────

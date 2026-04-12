@@ -168,17 +168,15 @@ export class AnchorService {
     });
 
     const accountId = data?.data?.id as string;
-    const attrs = data?.data?.attributes ?? {};
 
-    const accountNumbers = await this.getAccountNumbers(accountId);
-    const accountNum = accountNumbers?.[0]?.attributes ?? null;
-
+    // Account number is assigned asynchronously by Anchor.
+    // Caller must use pollVirtualNubans() to retrieve it after creation.
     return {
       id: accountId,
-      accountNumber: accountNum?.accountNumber ?? null,
-      accountName: accountNum?.name ?? attrs?.accountName ?? null,
-      bankName: accountNum?.bank?.name ?? null,
-      bankCode: accountNum?.bank?.code ?? null,
+      accountNumber: null,
+      accountName: null,
+      bankName: null,
+      bankCode: null,
     };
   }
 
@@ -222,25 +220,21 @@ export class AnchorService {
     bankCode: string;
   } | null> {
     for (let i = 0; i < attempts; i++) {
-      try {
-        const res = await this.getVirtualNubans(accountId);
-        const nuban = res?.data?.[0]?.attributes;
-        if (nuban?.accountNumber) return nuban;
-      } catch {
-        // Not ready yet — retry
+      const numbers = await this.getAccountNumbers(accountId);
+      const attrs = numbers?.[0]?.attributes;
+      if (attrs?.accountNumber) {
+        return {
+          accountNumber: attrs.accountNumber,
+          accountName: attrs.name ?? attrs.accountName ?? null,
+          bankName: attrs.bank?.name ?? null,
+          bankCode: attrs.bank?.code ?? null,
+        };
       }
       if (i < attempts - 1) {
         await new Promise((resolve) => setTimeout(resolve, delayMs));
       }
     }
     return null;
-  }
-
-  async getVirtualNubans(accountId: string) {
-    return this.request<any>(
-      'GET',
-      `/api/v1/accounts/${accountId}/virtual-nubans`,
-    );
   }
 
   // ── Transfers ───────────────────────────────────────────────────────────────

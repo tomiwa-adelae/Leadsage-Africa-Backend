@@ -66,6 +66,7 @@ export class PaystackService {
     amountNGN: number,
     metadata: Record<string, any>,
     callbackUrl: string,
+    reference?: string,
   ): Promise<InitResponse> {
     const data = await this.request<{
       authorization_url: string;
@@ -76,6 +77,7 @@ export class PaystackService {
       amount: Math.round(amountNGN * 100), // kobo
       metadata,
       callback_url: callbackUrl,
+      ...(reference ? { reference } : {}),
     });
 
     return {

@@ -81,6 +81,7 @@ model User {
   wallet        WalletAccount?
   walletTxs     WalletTransaction[]
   escrowsAsLandlord PaymentEscrow[] @relation("EscrowLandlord")
+  firstKeySavings FirstKeySavings[]
 }
 
 enum AdminPosition {
@@ -614,4 +615,110 @@ enum EscrowStatus {
   RELEASED
   REFUNDED
   CANCELLED
+}
+
+// ── FirstKey Savings ───────────────────────────────────────────────────────────
+
+model FirstKeySavings {
+  id     String @id @default(uuid())
+  userId String
+
+  // Academic context
+  academicLevel    String // "100" | "200" | "300" | "400" | "500"
+  expectedGradYear Int    // e.g. 2027
+
+  // Plan configuration
+  planName           String?
+  savingsTarget      Float?
+  rentalLocation     String?
+  duration           SavingsDuration
+  contributionAmount Float
+  frequency          SavingsFrequency
+  preferredDay       Int?    // 0-6 for weekly (Mon=1), 1-31 for monthly
+  preferredTime      String? // "09:00" HH:mm
+  startDate          DateTime
+  endDate            DateTime // maturity date
+
+  // Payment method for auto-deductions
+  paymentMethod SavingsPaymentMethod @default(WALLET)
+  cardAuthCode  String? // Paystack authorization code for recurring card charges
+
+  // Dedicated Anchor sub-account (one per plan)
+  anchorAccountId String? @unique
+  nuban           String?
+  bankName        String?
+  accountName     String?
+
+  // Running totals
+  totalDeposited Float @default(0)
+  interestEarned Float @default(0)
+
+  // Profile
+  dreamHousePhoto String?
+
+  // State
+  status             SavingsStatus @default(ACTIVE)
+  lastContributionAt DateTime?
+  nextContributionAt DateTime?
+  lastInterestAt     DateTime?
+  withdrawnAt        DateTime?
+  maturedAt          DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user         User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions SavingsTransaction[]
+}
+
+model SavingsTransaction {
+  id        String @id @default(uuid())
+  savingsId String
+  userId    String
+
+  type          SavingsTxType
+  amount        Float
+  balance       Float   // running principal balance after this tx
+  reference     String? @unique
+  note          String?
+  penaltyAmount Float?
+
+  createdAt DateTime @default(now())
+
+  savings FirstKeySavings @relation(fields: [savingsId], references: [id], onDelete: Cascade)
+}
+
+enum SavingsDuration {
+  ONE_YEAR
+  TWO_YEARS
+  UNTIL_GRADUATION
+}
+
+enum SavingsFrequency {
+  DAILY
+  WEEKLY
+  MONTHLY
+  CUSTOM
+}
+
+enum SavingsPaymentMethod {
+  WALLET
+  CARD
+  BANK_TRANSFER
+}
+
+enum SavingsStatus {
+  ACTIVE
+  PAUSED
+  MATURED
+  WITHDRAWN
+  BROKEN // early withdrawal with penalty
+}
+
+enum SavingsTxType {
+  DEPOSIT
+  INTEREST
+  WITHDRAWAL
+  PENALTY
+  REFUND
 }
