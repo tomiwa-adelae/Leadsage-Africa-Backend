@@ -1084,21 +1084,20 @@ export class UserService {
       },
     });
 
-    // Create escrow if the Paystack webhook hasn't already done so
-    const existingEscrow = await this.prisma.paymentEscrow.findFirst({
-      where: { rentalPaymentId: payment.id },
+    // Create escrow if the Paystack webhook hasn't already done so.
+    // We catch P2002 (unique constraint) because the webhook may race us to it — that's fine.
+    await this.wallet.createEscrowFromCard({
+      payerId: userId,
+      landlordId: payment.listing.landlordId,
+      amountNGN: payment.amount,
+      type: 'RENTAL_PAYMENT',
+      rentalPaymentId: payment.id,
+      paystackRef: reference,
+      releaseHoursFromNow: 24,
+    }).catch((err) => {
+      if (err?.code !== 'P2002') throw err;
+      // P2002 = webhook already created the escrow — nothing to do
     });
-    if (!existingEscrow) {
-      await this.wallet.createEscrowFromCard({
-        payerId: userId,
-        landlordId: payment.listing.landlordId,
-        amountNGN: payment.amount,
-        type: 'RENTAL_PAYMENT',
-        rentalPaymentId: payment.id,
-        paystackRef: reference,
-        releaseHoursFromNow: 24,
-      });
-    }
 
     return updated;
   }

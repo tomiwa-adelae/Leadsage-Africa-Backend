@@ -1320,17 +1320,17 @@ export class AdminService {
   async releaseOverdueEscrows() {
     const COMMISSION_RATE = 0.05;
     const RENTAL_HOLD_HOURS = 24;
+    const SHORTLET_HOLD_HOURS = 24;
 
-    // 1. Backfill real escrow records for PAID rentals that have no escrow
-    //    (these happen when the Paystack webhook fires but escrow creation failed,
-    //    or when the card payment was verified before the webhook arrived)
-    const paidWithoutEscrow = await this.prisma.rentalPayment.findMany({
+    let backfilled = 0;
+
+    // 1a. Backfill real escrow records for PAID rentals without an escrow
+    const rentalsWithoutEscrow = await this.prisma.rentalPayment.findMany({
       where: { status: 'PAID', escrow: null },
       include: { listing: { select: { landlordId: true } } },
     });
 
-    let backfilled = 0;
-    for (const p of paidWithoutEscrow) {
+    for (const p of rentalsWithoutEscrow) {
       const commission = Math.round(p.amount * COMMISSION_RATE * 100) / 100;
       const paidAt = p.paidAt ?? p.createdAt;
       const releaseAt = new Date(paidAt.getTime() + RENTAL_HOLD_HOURS * 3_600_000);
@@ -1344,6 +1344,39 @@ export class AdminService {
           type: 'RENTAL_PAYMENT',
           rentalPaymentId: p.id,
           paystackRef: p.paystackRef ?? undefined,
+          releaseAt,
+          fundedByCard: true,
+          status: 'HOLDING',
+        },
+      });
+      backfilled++;
+    }
+
+    // 1b. Backfill real escrow records for PAID shortlet bookings without an escrow
+    const bookingsWithoutEscrow = await this.prisma.booking.findMany({
+      where: { paymentStatus: 'PAID', escrow: null },
+      include: { listing: { select: { landlordId: true } } },
+    });
+
+    for (const b of bookingsWithoutEscrow) {
+      const commission = Math.round(b.totalPrice * COMMISSION_RATE * 100) / 100;
+      const paidAt = b.paidAt ?? b.createdAt;
+      // Mirror the same release formula used in getPendingEscrows
+      const hoursUntilCheckin = Math.ceil(
+        (new Date(b.checkIn).getTime() - Date.now()) / 3_600_000,
+      );
+      const holdHours = Math.max(SHORTLET_HOLD_HOURS, hoursUntilCheckin + SHORTLET_HOLD_HOURS);
+      const releaseAt = new Date(paidAt.getTime() + holdHours * 3_600_000);
+      await this.prisma.paymentEscrow.create({
+        data: {
+          payerId: b.userId,
+          landlordId: b.listing.landlordId,
+          amount: b.totalPrice,
+          commission,
+          netAmount: b.totalPrice - commission,
+          type: 'SHORTLET_BOOKING',
+          bookingId: b.id,
+          paystackRef: b.paymentRef ?? undefined,
           releaseAt,
           fundedByCard: true,
           status: 'HOLDING',
