@@ -8,6 +8,7 @@ import { PrismaService } from 'src/prisma/prisma.service';
 import { AnchorService } from 'src/anchor/anchor.service';
 import { WalletService } from 'src/wallet/wallet.service';
 import { PaystackService } from 'src/paystack/paystack.service';
+import { MailService } from 'src/mail/mail.service';
 import { CreateSavingsDto } from './dto/create-savings.dto';
 import { UpdateSavingsDto } from './dto/update-savings.dto';
 import { Prisma } from '@prisma/client';
@@ -30,6 +31,7 @@ export class SavingsService {
     private readonly anchor: AnchorService,
     private readonly wallet: WalletService,
     private readonly paystack: PaystackService,
+    private readonly mail: MailService,
   ) {}
 
   // ── Create Plan ─────────────────────────────────────────────────────────────
@@ -75,7 +77,7 @@ export class SavingsService {
       this.logger.warn(`Could not provision Anchor account for savings: ${e}`);
     }
 
-    return this.prisma.firstKeySavings.create({
+    const plan = await this.prisma.firstKeySavings.create({
       data: {
         userId,
         academicLevel: dto.academicLevel,
@@ -99,6 +101,18 @@ export class SavingsService {
         accountName,
       },
     });
+
+    this.sendSavingsEmail(
+      userId,
+      `Your FirstKey savings plan is live 🎉`,
+      `<p>Hi there,</p>
+       <p>Your <strong>${plan.planName ?? 'FirstKey'}</strong> savings plan has been created successfully.</p>
+       <p>It earns <strong>12% interest per annum</strong>, compounded daily. Make your first deposit to start earning.</p>
+       <p>Plan ends: <strong>${endDate.toLocaleDateString('en-NG', { day: 'numeric', month: 'long', year: 'numeric' })}</strong></p>
+       <p>— Leadsage Africa</p>`,
+    );
+
+    return plan;
   }
 
   // ── List Plans ──────────────────────────────────────────────────────────────
@@ -120,13 +134,36 @@ export class SavingsService {
       include: {
         transactions: {
           orderBy: { createdAt: 'desc' },
-          take: 50,
+          take: 20,
         },
       },
     });
 
     if (!plan) throw new NotFoundException('Savings plan not found');
     return { ...this.enrichPlan(plan), transactions: plan.transactions };
+  }
+
+  async getTransactions(userId: string, planId: string, page: number, limit: number) {
+    const plan = await this.getPlanOrThrow(userId, planId);
+    const skip = (page - 1) * limit;
+
+    const [transactions, total] = await Promise.all([
+      this.prisma.savingsTransaction.findMany({
+        where: { savingsId: plan.id },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.savingsTransaction.count({ where: { savingsId: plan.id } }),
+    ]);
+
+    return {
+      transactions,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
   }
 
   // ── Manual Deposit ──────────────────────────────────────────────────────────
@@ -148,6 +185,15 @@ export class SavingsService {
 
     // Record deposit + update totals
     await this.recordDeposit(plan, amount, reference, 'Wallet deposit');
+
+    this.sendSavingsEmail(
+      userId,
+      `FirstKey deposit confirmed — ₦${amount.toLocaleString()}`,
+      `<p>Hi there,</p>
+       <p>₦${amount.toLocaleString()} has been deposited into your <strong>${plan.planName ?? 'FirstKey'}</strong> savings plan from your wallet.</p>
+       <p>Your savings are earning <strong>12% interest per annum</strong>, compounded daily.</p>
+       <p>— Leadsage Africa</p>`,
+    );
 
     return { success: true };
   }
@@ -217,7 +263,7 @@ export class SavingsService {
     });
     if (!user) throw new NotFoundException('User not found');
 
-    const reference = `fks-card-${planId.slice(0, 8)}-${Date.now()}`;
+    const reference = `fks-card-${randomUUID()}`;
 
     const result = await this.paystack.initializeTransaction(
       user.email,
@@ -233,18 +279,20 @@ export class SavingsService {
   async verifyCardDeposit(userId: string, planId: string, reference: string) {
     const plan = await this.getPlanOrThrow(userId, planId);
 
-    // Idempotency
-    const existing = await this.prisma.savingsTransaction.findUnique({
-      where: { reference },
-    });
-    if (existing) return { success: true, alreadyVerified: true };
-
     const result = await this.paystack.verifyTransaction(reference);
     if (result.status !== 'success') {
       throw new BadRequestException('Payment not successful');
     }
 
     const amount = result.amount / 100;
+
+    // recordDeposit catches P2002 (duplicate reference) — safe to call twice
+    const alreadyRecorded = await this.prisma.savingsTransaction.findUnique({
+      where: { reference },
+      select: { id: true },
+    });
+    if (alreadyRecorded) return { success: true, alreadyVerified: true };
+
     await this.recordDeposit(plan, amount, reference, 'Card deposit');
 
     await this.prisma.notification.create({
@@ -256,6 +304,15 @@ export class SavingsService {
         data: { savingsId: planId, amount },
       },
     });
+
+    this.sendSavingsEmail(
+      userId,
+      `FirstKey card deposit confirmed — ₦${amount.toLocaleString()}`,
+      `<p>Hi there,</p>
+       <p>Your card payment of <strong>₦${amount.toLocaleString()}</strong> has been credited to your <strong>${plan.planName ?? 'FirstKey'}</strong> savings plan.</p>
+       <p>Your savings are earning <strong>12% interest per annum</strong>, compounded daily.</p>
+       <p>— Leadsage Africa</p>`,
+    );
 
     return { success: true, amount };
   }
@@ -297,6 +354,15 @@ export class SavingsService {
         data: { savingsId: plan.id, amount: amountNGN },
       },
     });
+
+    this.sendSavingsEmail(
+      plan.userId,
+      `FirstKey bank transfer received — ₦${amountNGN.toLocaleString()}`,
+      `<p>Hi there,</p>
+       <p>A bank transfer of <strong>₦${amountNGN.toLocaleString()}</strong> has been credited to your <strong>${plan.planName ?? 'FirstKey'}</strong> savings plan.</p>
+       <p>Your savings are earning <strong>12% interest per annum</strong>, compounded daily.</p>
+       <p>— Leadsage Africa</p>`,
+    );
 
     this.logger.log(`FirstKey plan ${plan.id} credited ₦${amountNGN}`);
   }
@@ -397,6 +463,20 @@ export class SavingsService {
         data: { savingsId: planId },
       },
     });
+
+    this.sendSavingsEmail(
+      userId,
+      isMatured ? `FirstKey savings withdrawn — ₦${payout.toLocaleString()}` : `FirstKey early withdrawal processed`,
+      isMatured
+        ? `<p>Hi there,</p>
+           <p>Your <strong>${plan.planName ?? 'FirstKey'}</strong> savings plan has matured and <strong>₦${payout.toLocaleString()}</strong> has been credited to your wallet. Congratulations!</p>
+           <p>— Leadsage Africa</p>`
+        : `<p>Hi there,</p>
+           <p>Your early withdrawal from <strong>${plan.planName ?? 'FirstKey'}</strong> has been processed.</p>
+           <p>Amount credited to wallet: <strong>₦${payout.toLocaleString()}</strong></p>
+           ${penalty > 0 ? `<p>Early withdrawal penalty applied: <strong>₦${penalty.toLocaleString()}</strong> — ${penaltyNote}</p>` : ''}
+           <p>— Leadsage Africa</p>`,
+    );
 
     return { payout, penalty, isMatured };
   }
@@ -540,6 +620,15 @@ export class SavingsService {
         );
 
         await this.recordDeposit(plan, plan.contributionAmount, reference, 'Auto-save contribution');
+
+        this.sendSavingsEmail(
+          plan.userId,
+          `FirstKey auto-save — ₦${plan.contributionAmount.toLocaleString()} saved`,
+          `<p>Hi there,</p>
+           <p>Your scheduled auto-save of <strong>₦${plan.contributionAmount.toLocaleString()}</strong> has been added to your <strong>${plan.planName ?? 'FirstKey'}</strong> savings plan.</p>
+           <p>Your savings continue to earn <strong>12% interest per annum</strong>, compounded daily.</p>
+           <p>— Leadsage Africa</p>`,
+        );
       } catch (e) {
         this.logger.error(`Auto-contribution failed for plan ${plan.id}: ${e}`);
       }
@@ -563,6 +652,7 @@ export class SavingsService {
       });
 
       const balance = plan.totalDeposited + plan.interestEarned;
+
       await this.prisma.notification.create({
         data: {
           userId: plan.userId,
@@ -572,12 +662,45 @@ export class SavingsService {
           data: { savingsId: plan.id },
         },
       });
+
+      this.sendSavingsEmail(
+        plan.userId,
+        `🎉 Your FirstKey savings have matured — ₦${balance.toLocaleString()} ready`,
+        `<p>Hi there,</p>
+         <p>Congratulations! Your <strong>${plan.planName ?? 'FirstKey'}</strong> savings plan has reached its maturity date.</p>
+         <p>Your total balance of <strong>₦${balance.toLocaleString()}</strong> (including ₦${plan.interestEarned.toLocaleString()} in interest) is ready for withdrawal.</p>
+         <p>Log in to your Leadsage account to withdraw to your wallet.</p>
+         <p>— Leadsage Africa</p>`,
+      );
     }
 
     if (plans.length) this.logger.log(`Matured ${plans.length} savings plans`);
   }
 
   // ── Private Helpers ─────────────────────────────────────────────────────────
+
+  /** Fire-and-forget email helper — never throws so it can't break the main flow */
+  private async sendSavingsEmail(
+    userId: string,
+    subject: string,
+    html: string,
+  ) {
+    try {
+      const user = await this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { email: true, firstName: true, lastName: true },
+      });
+      if (!user) return;
+      await this.mail.sendMail({
+        toEmail: user.email,
+        toName: `${user.firstName} ${user.lastName}`.trim(),
+        subject,
+        html,
+      });
+    } catch (e) {
+      this.logger.warn(`Savings email failed for user ${userId}: ${e}`);
+    }
+  }
 
   private async getPlanOrThrow(userId: string, planId: string): Promise<FirstKeySavings> {
     const plan = await this.prisma.firstKeySavings.findFirst({

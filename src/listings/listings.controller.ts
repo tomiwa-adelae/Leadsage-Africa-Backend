@@ -6,6 +6,7 @@ import {
   HttpCode,
   HttpStatus,
   Param,
+  Patch,
   Post,
   Query,
   UploadedFiles,
@@ -17,6 +18,7 @@ import { JwtAuthGuard } from 'src/auth/guards/jwt-auth.guard';
 import { CurrentUser } from 'src/decorators/current-user.decorator';
 import { Public } from 'src/decorators/public.decorator';
 import { CreateListingDto } from './dto/create-listing.dto';
+import { UpdateListingDto } from './dto/update-listing.dto';
 import { ListingsService } from './listings.service';
 
 @UseGuards(JwtAuthGuard)
@@ -78,6 +80,27 @@ export class ListingsController {
     @CurrentUser() user: { id: string },
   ) {
     return this.listingsService.findOne(id, user.id);
+  }
+
+  @Patch(':id')
+  @HttpCode(HttpStatus.OK)
+  @UseInterceptors(FilesInterceptor('photos', 10))
+  update(
+    @Param('id') id: string,
+    @CurrentUser() user: { id: string },
+    @Body() dto: UpdateListingDto,
+    @UploadedFiles() photos: Express.Multer.File[],
+  ) {
+    return this.listingsService.update(id, user.id, dto, photos ?? []);
+  }
+
+  @Patch(':id/archive')
+  @HttpCode(HttpStatus.OK)
+  archive(
+    @Param('id') id: string,
+    @CurrentUser() user: { id: string },
+  ) {
+    return this.listingsService.archiveListing(id, user.id);
   }
 
   @Delete(':id')

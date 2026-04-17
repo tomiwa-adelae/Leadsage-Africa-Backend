@@ -604,4 +604,153 @@ export class LandlordService {
       select: { id: true, instantBook: true },
     });
   }
+
+  // ── Listing detail ────────────────────────────────────────────────────────
+
+  async getListing(landlordId: string, listingId: string) {
+    const listing = await this.prisma.listing.findFirst({
+      where: { id: listingId, landlordId, isDeleted: false },
+    });
+    if (!listing) throw new NotFoundException('Listing not found');
+
+    const [applicationCount, bookingCount, recentApplications, recentBookings] =
+      await Promise.all([
+        this.prisma.application.count({ where: { listingId } }),
+        this.prisma.booking.count({ where: { listingId } }),
+        this.prisma.application.findMany({
+          where: { listingId },
+          orderBy: { createdAt: 'desc' },
+          take: 5,
+          include: { user: { select: USER_SELECT } },
+        }),
+        this.prisma.booking.findMany({
+          where: { listingId },
+          orderBy: { createdAt: 'desc' },
+          take: 5,
+          include: { user: { select: USER_SELECT } },
+        }),
+      ]);
+
+    return {
+      ...listing,
+      applicationCount,
+      bookingCount,
+      recentApplications,
+      recentBookings,
+    };
+  }
+
+  // ── Dashboard ──────────────────────────────────────────────────────────────
+
+  async getDashboard(landlordId: string) {
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    const [
+      totalListings,
+      activeListings,
+      pendingApplications,
+      activeLeases,
+      expiringLeases,
+      recentApplications,
+      recentBookings,
+      monthlyRevenue,
+      wallet,
+      savings,
+    ] = await Promise.all([
+      this.prisma.listing.count({ where: { landlordId } }),
+      this.prisma.listing.count({ where: { landlordId, status: 'PUBLISHED' } }),
+      this.prisma.application.count({
+        where: { listing: { landlordId }, status: { in: ['PENDING', 'UNDER_REVIEW'] } },
+      }),
+      this.prisma.rentalAgreement.count({ where: { landlordId, status: 'FULLY_SIGNED' } }),
+      this.prisma.rentalAgreement.count({
+        where: {
+          landlordId,
+          status: 'FULLY_SIGNED',
+          endDate: { lte: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000) },
+        },
+      }),
+      this.prisma.application.findMany({
+        where: { listing: { landlordId } },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+        include: {
+          listing: { select: { id: true, slug: true, title: true, area: true, state: true, photos: true } },
+          user: { select: USER_SELECT },
+        },
+      }),
+      this.prisma.booking.findMany({
+        where: { listing: { landlordId }, status: { in: ['PENDING', 'CONFIRMED'] } },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+        include: {
+          listing: { select: { id: true, slug: true, title: true, area: true, state: true, photos: true } },
+          user: { select: USER_SELECT },
+        },
+      }),
+      // Revenue for last 6 months
+      (async () => {
+        const months: { month: string; revenue: number }[] = [];
+        for (let i = 5; i >= 0; i--) {
+          const start = new Date(now.getFullYear(), now.getMonth() - i, 1);
+          const end = new Date(now.getFullYear(), now.getMonth() - i + 1, 1);
+          const agg = await this.prisma.booking.aggregate({
+            where: {
+              listing: { landlordId },
+              status: 'COMPLETED',
+              paymentStatus: { in: ['PAID', 'PARTIALLY_REFUNDED'] },
+              createdAt: { gte: start, lt: end },
+            },
+            _sum: { totalPrice: true },
+          });
+          months.push({
+            month: start.toLocaleDateString('en-US', { month: 'short' }),
+            revenue: agg._sum.totalPrice ?? 0,
+          });
+        }
+        return months;
+      })(),
+      this.prisma.walletAccount.findUnique({
+        where: { userId: landlordId },
+        select: { availableBalance: true, pendingBalance: true },
+      }),
+      this.prisma.firstKeySavings.findMany({
+        where: { userId: landlordId, status: { in: ['ACTIVE', 'PAUSED', 'MATURED'] } },
+        select: { id: true, planName: true, totalDeposited: true, interestEarned: true, status: true },
+      }),
+    ]);
+
+    const thisMonthRevenue = await this.prisma.booking.aggregate({
+      where: {
+        listing: { landlordId },
+        status: 'COMPLETED',
+        paymentStatus: { in: ['PAID', 'PARTIALLY_REFUNDED'] },
+        createdAt: { gte: startOfMonth },
+      },
+      _sum: { totalPrice: true },
+    });
+
+    return {
+      stats: {
+        totalListings,
+        activeListings,
+        pendingApplications,
+        activeLeases,
+        expiringLeases,
+        thisMonthRevenue: thisMonthRevenue._sum.totalPrice ?? 0,
+      },
+      monthlyRevenue,
+      recentApplications,
+      recentBookings,
+      wallet: {
+        availableBalance: wallet?.availableBalance ?? 0,
+        pendingBalance: wallet?.pendingBalance ?? 0,
+      },
+      savings: savings.map((p) => ({
+        ...p,
+        balance: p.totalDeposited + p.interestEarned,
+      })),
+    };
+  }
 }

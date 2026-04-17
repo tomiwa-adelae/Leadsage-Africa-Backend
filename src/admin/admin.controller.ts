@@ -265,4 +265,26 @@ export class AdminController {
   markRentalPaymentOverdue(@Param('id') id: string) {
     return this.adminService.markRentalPaymentOverdue(id);
   }
+
+  // ── Savings ────────────────────────────────────────────────────────────────
+
+  @Get('savings')
+  getAllSavingsPlans(
+    @Query('status') status?: string,
+    @Query('page') page = '1',
+    @Query('limit') limit = '20',
+    @Query('search') search?: string,
+  ) {
+    return this.adminService.getAllSavingsPlans({ status, page: +page, limit: +limit, search });
+  }
+
+  @Get('savings/stats')
+  getSavingsStats() {
+    return this.adminService.getSavingsStats();
+  }
+
+  @Get('savings/:id')
+  getSavingsPlanById(@Param('id') id: string) {
+    return this.adminService.getSavingsPlanById(id);
+  }
 }

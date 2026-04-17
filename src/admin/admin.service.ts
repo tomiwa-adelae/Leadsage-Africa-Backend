@@ -1217,4 +1217,99 @@ export class AdminService {
       data: { status: 'OVERDUE' },
     });
   }
+
+  // ── Savings ────────────────────────────────────────────────────────────────
+
+  async getSavingsStats() {
+    const [total, active, matured, broken, totals] = await Promise.all([
+      this.prisma.firstKeySavings.count(),
+      this.prisma.firstKeySavings.count({ where: { status: 'ACTIVE' } }),
+      this.prisma.firstKeySavings.count({ where: { status: 'MATURED' } }),
+      this.prisma.firstKeySavings.count({ where: { status: { in: ['BROKEN', 'WITHDRAWN'] } } }),
+      this.prisma.firstKeySavings.aggregate({
+        _sum: { totalDeposited: true, interestEarned: true },
+      }),
+    ]);
+
+    return {
+      totalPlans: total,
+      activePlans: active,
+      maturedPlans: matured,
+      closedPlans: broken,
+      totalDeposited: totals._sum.totalDeposited ?? 0,
+      totalInterest: totals._sum.interestEarned ?? 0,
+    };
+  }
+
+  async getAllSavingsPlans(query: {
+    status?: string;
+    page: number;
+    limit: number;
+    search?: string;
+  }) {
+    const { status, page, limit, search } = query;
+    const skip = (page - 1) * limit;
+
+    const where: any = {
+      ...(status ? { status } : {}),
+      ...(search
+        ? {
+            OR: [
+              { planName: { contains: search, mode: 'insensitive' } },
+              { user: { firstName: { contains: search, mode: 'insensitive' } } },
+              { user: { lastName: { contains: search, mode: 'insensitive' } } },
+              { user: { email: { contains: search, mode: 'insensitive' } } },
+            ],
+          }
+        : {}),
+    };
+
+    const [plans, total] = await Promise.all([
+      this.prisma.firstKeySavings.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+        include: {
+          user: {
+            select: { id: true, firstName: true, lastName: true, email: true, image: true },
+          },
+        },
+      }),
+      this.prisma.firstKeySavings.count({ where }),
+    ]);
+
+    return {
+      plans: plans.map((p) => ({
+        ...p,
+        balance: p.totalDeposited + p.interestEarned,
+      })),
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
+  }
+
+  async getSavingsPlanById(id: string) {
+    const plan = await this.prisma.firstKeySavings.findUnique({
+      where: { id },
+      include: {
+        user: {
+          select: { id: true, firstName: true, lastName: true, email: true, image: true, phoneNumber: true },
+        },
+        transactions: {
+          orderBy: { createdAt: 'desc' },
+          take: 50,
+        },
+      },
+    });
+
+    if (!plan) throw new NotFoundException('Savings plan not found');
+
+    return {
+      ...plan,
+      balance: plan.totalDeposited + plan.interestEarned,
+    };
+  }
 }

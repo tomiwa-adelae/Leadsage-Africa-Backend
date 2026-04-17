@@ -23,12 +23,17 @@ export class UserService {
   // ── Dashboard Stats ────────────────────────────────────────────────────────
 
   async getStats(userId: string) {
-    const [saved, applications, bookings, unreadNotifications] =
+    const [saved, applications, bookings, unreadNotifications, savingsPlans, wallet] =
       await Promise.all([
         this.prisma.savedListing.count({ where: { userId } }),
         this.prisma.application.count({ where: { userId } }),
         this.prisma.booking.count({ where: { userId } }),
         this.prisma.notification.count({ where: { userId, isRead: false } }),
+        this.prisma.firstKeySavings.findMany({
+          where: { userId, status: { in: ['ACTIVE', 'PAUSED', 'MATURED'] } },
+          select: { id: true, planName: true, totalDeposited: true, interestEarned: true, status: true },
+        }),
+        this.prisma.walletAccount.findUnique({ where: { userId }, select: { availableBalance: true } }),
       ]);
 
     const recentApplications = await this.prisma.application.findMany({
@@ -71,11 +76,25 @@ export class UserService {
       },
     });
 
+    const savingsTotalBalance = savingsPlans.reduce(
+      (sum, p) => sum + p.totalDeposited + p.interestEarned, 0,
+    );
+    const savingsTotalInterest = savingsPlans.reduce(
+      (sum, p) => sum + p.interestEarned, 0,
+    );
+
     return {
       saved,
       applications,
       bookings,
       unreadNotifications,
+      walletBalance: wallet?.availableBalance ?? 0,
+      savings: {
+        activePlans: savingsPlans.length,
+        totalBalance: savingsTotalBalance,
+        totalInterest: savingsTotalInterest,
+        plans: savingsPlans,
+      },
       recentApplications,
       recentBookings,
     };

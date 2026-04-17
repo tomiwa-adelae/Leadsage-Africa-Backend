@@ -15,6 +15,7 @@ import { randomUUID } from 'crypto';
 import slugify from 'slugify';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { CreateListingDto } from './dto/create-listing.dto';
+import { UpdateListingDto } from './dto/update-listing.dto';
 
 /** Convert kebab-case frontend enum value → SCREAMING_SNAKE_CASE Prisma enum */
 function toEnum<T extends string>(value: string): T {
@@ -285,6 +286,90 @@ export class ListingsService {
     });
     if (!listing) throw new NotFoundException('Listing not found');
     return listing;
+  }
+
+  async update(
+    id: string,
+    landlordId: string,
+    dto: UpdateListingDto,
+    newPhotoFiles: Express.Multer.File[],
+  ) {
+    const listing = await this.prisma.listing.findFirst({
+      where: { id, landlordId, isDeleted: false },
+    });
+    if (!listing) throw new NotFoundException('Listing not found');
+
+    // Determine which existing photos to keep
+    const keepPhotos: string[] = dto.keepPhotos
+      ? JSON.parse(dto.keepPhotos)
+      : listing.photos;
+
+    // Upload any new photos
+    const newPhotoUrls =
+      newPhotoFiles.length > 0
+        ? await this.uploadPhotos(landlordId, newPhotoFiles)
+        : [];
+
+    const finalPhotos = [...keepPhotos, ...newPhotoUrls];
+
+    // Re-queue for review if previously published or rejected
+    const statusesToRequeue: string[] = ['PUBLISHED', 'REJECTED'];
+    const newStatus = statusesToRequeue.includes(listing.status)
+      ? 'PENDING_REVIEW'
+      : listing.status;
+
+    return this.prisma.listing.update({
+      where: { id },
+      data: {
+        ...(dto.title !== undefined && { title: dto.title }),
+        ...(dto.summary !== undefined && { summary: dto.summary }),
+        ...(dto.description !== undefined && { description: dto.description }),
+        ...(dto.state !== undefined && { state: dto.state }),
+        ...(dto.lga !== undefined && { lga: dto.lga }),
+        ...(dto.area !== undefined && { area: dto.area }),
+        ...(dto.address !== undefined && { address: dto.address }),
+        ...(dto.propertyCategory !== undefined && {
+          propertyCategory: toEnum<PropertyCategory>(dto.propertyCategory),
+        }),
+        ...(dto.bedrooms !== undefined && { bedrooms: dto.bedrooms }),
+        ...(dto.bathrooms !== undefined && { bathrooms: dto.bathrooms }),
+        ...(dto.toilets !== undefined && { toilets: dto.toilets }),
+        ...(dto.sizeInSqm !== undefined && { sizeInSqm: dto.sizeInSqm }),
+        ...(dto.furnished !== undefined && {
+          furnished: toEnum<FurnishedStatus>(dto.furnished),
+        }),
+        ...(dto.pricePerYear !== undefined && { pricePerYear: dto.pricePerYear }),
+        ...(dto.paymentFrequency !== undefined && {
+          paymentFrequency: toEnum<PaymentFrequency>(dto.paymentFrequency),
+        }),
+        ...(dto.cautionFee !== undefined && { cautionFee: dto.cautionFee }),
+        ...(dto.serviceCharge !== undefined && { serviceCharge: dto.serviceCharge }),
+        ...(dto.pricePerNight !== undefined && { pricePerNight: dto.pricePerNight }),
+        ...(dto.minimumNights !== undefined && { minimumNights: dto.minimumNights }),
+        ...(dto.instantBook !== undefined && { instantBook: dto.instantBook }),
+        ...(dto.amenities !== undefined && { amenities: dto.amenities }),
+        ...(dto.petFriendly !== undefined && { petFriendly: dto.petFriendly }),
+        ...(dto.smokingAllowed !== undefined && { smokingAllowed: dto.smokingAllowed }),
+        ...(dto.availableFrom !== undefined && {
+          availableFrom: new Date(dto.availableFrom),
+        }),
+        photos: finalPhotos,
+        status: newStatus as ListingStatus,
+      },
+    });
+  }
+
+  async archiveListing(id: string, landlordId: string) {
+    const listing = await this.prisma.listing.findFirst({
+      where: { id, landlordId, isDeleted: false },
+    });
+    if (!listing) throw new NotFoundException('Listing not found');
+
+    return this.prisma.listing.update({
+      where: { id },
+      data: { status: 'ARCHIVED' as ListingStatus },
+      select: { id: true, status: true },
+    });
   }
 
   async softDelete(id: string, landlordId: string) {

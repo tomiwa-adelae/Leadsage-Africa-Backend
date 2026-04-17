@@ -10,26 +10,29 @@ import {
 export class UpdateUserProfileDto {
   @IsString()
   @IsEmail({}, { message: 'Please provide a valid email address' })
-  @IsNotEmpty()
-  email: string;
-
-  @IsString()
-  @MinLength(2, { message: 'First name must be at least 2 characters' })
-  @MaxLength(100, { message: 'First name must not exceed 100 character' })
-  firstName: string;
-
-  @IsString()
-  @MinLength(2, { message: 'Last name must be at least 2 characters' })
-  @MaxLength(100, { message: 'Last name must not exceed 100 characters' })
-  lastName: string;
+  @IsOptional()
+  email?: string;
 
   @IsString()
   @IsOptional()
-  image: string;
+  @MinLength(2, { message: 'First name must be at least 2 characters' })
+  @MaxLength(100, { message: 'First name must not exceed 100 character' })
+  firstName?: string;
 
   @IsString()
+  @IsOptional()
+  @MinLength(2, { message: 'Last name must be at least 2 characters' })
+  @MaxLength(100, { message: 'Last name must not exceed 100 characters' })
+  lastName?: string;
+
+  @IsString()
+  @IsOptional()
+  image?: string;
+
+  @IsString()
+  @IsOptional()
   @MinLength(2, { message: 'Phone number must be valid' })
-  phoneNumber: string;
+  phoneNumber?: string;
 
   @IsString()
   @IsOptional()
@@ -54,4 +57,8 @@ export class UpdateUserProfileDto {
   @IsString()
   @IsOptional()
   country: string;
+
+  @IsString()
+  @IsOptional()
+  bio: string;
 }

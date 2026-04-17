@@ -572,6 +572,85 @@ export class AuthService {
     };
   }
 
+  // ── Profile update ───────────────────────────────────────────────────────
+  async updateProfile(userId: string, dto: {
+    firstName?: string;
+    lastName?: string;
+    phoneNumber?: string;
+    dob?: string;
+    gender?: string;
+    address?: string;
+    city?: string;
+    state?: string;
+    country?: string;
+    bio?: string;
+  }) {
+    const updated = await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        ...(dto.firstName !== undefined && { firstName: dto.firstName }),
+        ...(dto.lastName !== undefined && { lastName: dto.lastName }),
+        ...(dto.phoneNumber !== undefined && { phoneNumber: dto.phoneNumber }),
+        ...(dto.dob !== undefined && { dob: dto.dob }),
+        ...(dto.gender !== undefined && { gender: dto.gender }),
+        ...(dto.address !== undefined && { address: dto.address }),
+        ...(dto.city !== undefined && { city: dto.city }),
+        ...(dto.state !== undefined && { state: dto.state }),
+        ...(dto.country !== undefined && { country: dto.country }),
+        ...(dto.bio !== undefined && { bio: dto.bio }),
+      },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        phoneNumber: true,
+        image: true,
+        dob: true,
+        gender: true,
+        address: true,
+        city: true,
+        state: true,
+        country: true,
+        bio: true,
+        role: true,
+        username: true,
+        onboardingCompleted: true,
+      },
+    });
+    return updated;
+  }
+
+  // ── Change password ───────────────────────────────────────────────────────
+  async changePassword(
+    userId: string,
+    currentPassword: string,
+    newPassword: string,
+    confirmPassword: string,
+  ) {
+    if (newPassword !== confirmPassword)
+      throw new BadRequestException('Passwords do not match');
+
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundException('User not found');
+
+    if (!user.password)
+      throw new BadRequestException(
+        'This account uses Google sign-in and does not have a password.',
+      );
+
+    const valid = await bcrypt.compare(currentPassword, user.password);
+    if (!valid) throw new BadRequestException('Current password is incorrect');
+
+    const hashed = await bcrypt.hash(newPassword, 10);
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { password: hashed },
+    });
+
+    return { message: 'Password changed successfully' };
+  }
+
   // ── Cloudflare Turnstile ──────────────────────────────────────────────────
   // Verifies a Turnstile challenge token with Cloudflare's siteverify API.
   // Throws UnauthorizedException if the token is missing, invalid, or expired.

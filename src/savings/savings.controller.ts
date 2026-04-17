@@ -5,6 +5,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   HttpCode,
   HttpStatus,
   UseGuards,
@@ -42,6 +43,16 @@ export class SavingsController {
     @Param('id') id: string,
   ) {
     return this.savingsService.getPlanById(user.id, id);
+  }
+
+  @Get(':id/transactions')
+  getTransactions(
+    @CurrentUser() user: { id: string },
+    @Param('id') id: string,
+    @Query('page') page = '1',
+    @Query('limit') limit = '20',
+  ) {
+    return this.savingsService.getTransactions(user.id, id, +page, +limit);
   }
 
   @Patch(':id')

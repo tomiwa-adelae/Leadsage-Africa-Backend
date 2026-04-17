@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Get,
   HttpCode,
   HttpStatus,
   Patch,
@@ -20,6 +21,8 @@ import { VerifyCodeDto } from './dto/verify-code.dto';
 import { SetNewPasswordDto } from './dto/set-new-password.dto';
 import { OnboardingDto } from './dto/onboarding.dto';
 import { VerifyNinDto } from './dto/verify-nin.dto';
+import { UpdateUserProfileDto } from './dto/update-user-profile.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { CurrentUser } from 'src/decorators/current-user.decorator';
 
@@ -181,6 +184,38 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   async verifyNin(@Body() dto: VerifyNinDto) {
     return this.authService.verifyNin(dto.nin);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('me')
+  @HttpCode(HttpStatus.OK)
+  getMe(@CurrentUser() user: { id: string }) {
+    return this.authService.findUserById(user.id);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Patch('profile')
+  @HttpCode(HttpStatus.OK)
+  updateProfile(
+    @CurrentUser() user: { id: string },
+    @Body() dto: UpdateUserProfileDto,
+  ) {
+    return this.authService.updateProfile(user.id, dto);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Patch('change-password')
+  @HttpCode(HttpStatus.OK)
+  changePassword(
+    @CurrentUser() user: { id: string },
+    @Body() dto: ChangePasswordDto,
+  ) {
+    return this.authService.changePassword(
+      user.id,
+      dto.currentPassword,
+      dto.newPassword,
+      dto.confirmPassword,
+    );
   }
 
   @Post('google/exchange')

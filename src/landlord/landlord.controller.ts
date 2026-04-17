@@ -136,6 +136,16 @@ export class LandlordController {
     return this.landlordService.getEarnings(user.id);
   }
 
+  // ── Listing detail ────────────────────────────────────────────────────────
+
+  @Get('listings/:id')
+  getListing(
+    @CurrentUser() user: { id: string },
+    @Param('id') id: string,
+  ) {
+    return this.landlordService.getListing(user.id, id);
+  }
+
   // ── Instant Book toggle ────────────────────────────────────────────────────
 
   @Patch('listings/:id/instant-book')
@@ -193,5 +203,12 @@ export class LandlordController {
     @Param('id') id: string,
   ) {
     return this.landlordService.markListingAvailable(user.id, id);
+  }
+
+  // ── Dashboard ──────────────────────────────────────────────────────────────
+
+  @Get('dashboard')
+  getDashboard(@CurrentUser() user: { id: string }) {
+    return this.landlordService.getDashboard(user.id);
   }
 }
