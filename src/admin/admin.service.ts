@@ -12,6 +12,7 @@ import { AdminPosition, ListingStatus } from '@prisma/client';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { MailService } from 'src/mail/mail.service';
 import { PaystackService } from 'src/paystack/paystack.service';
+import { WalletService } from 'src/wallet/wallet.service';
 import { ListingApprovedEmail } from 'emails/listing-approved-email';
 import { ListingRejectedEmail } from 'emails/listing-rejected-email';
 import { RejectListingDto } from './dto/reject-listing.dto';
@@ -45,6 +46,7 @@ export class AdminService {
     private prisma: PrismaService,
     private mail: MailService,
     private paystack: PaystackService,
+    private wallet: WalletService,
   ) {}
 
   // ── Dashboard Stats ────────────────────────────────────────────────────────
@@ -1311,5 +1313,66 @@ export class AdminService {
       ...plan,
       balance: plan.totalDeposited + plan.interestEarned,
     };
+  }
+
+  // ── Escrow utilities ────────────────────────────────────────────────────────
+
+  async releaseOverdueEscrows() {
+    const COMMISSION_RATE = 0.05;
+    const RENTAL_HOLD_HOURS = 24;
+
+    // 1. Backfill real escrow records for PAID rentals that have no escrow
+    //    (these happen when the Paystack webhook fires but escrow creation failed,
+    //    or when the card payment was verified before the webhook arrived)
+    const paidWithoutEscrow = await this.prisma.rentalPayment.findMany({
+      where: { status: 'PAID', escrow: null },
+      include: { listing: { select: { landlordId: true } } },
+    });
+
+    let backfilled = 0;
+    for (const p of paidWithoutEscrow) {
+      const commission = Math.round(p.amount * COMMISSION_RATE * 100) / 100;
+      const paidAt = p.paidAt ?? p.createdAt;
+      const releaseAt = new Date(paidAt.getTime() + RENTAL_HOLD_HOURS * 3_600_000);
+      await this.prisma.paymentEscrow.create({
+        data: {
+          payerId: p.userId,
+          landlordId: p.listing.landlordId,
+          amount: p.amount,
+          commission,
+          netAmount: p.amount - commission,
+          type: 'RENTAL_PAYMENT',
+          rentalPaymentId: p.id,
+          paystackRef: p.paystackRef ?? undefined,
+          releaseAt,
+          fundedByCard: true,
+          status: 'HOLDING',
+        },
+      });
+      backfilled++;
+    }
+
+    // 2. Release all overdue HOLDING escrows (includes the ones just backfilled)
+    const due = await this.prisma.paymentEscrow.findMany({
+      where: { status: 'HOLDING', releaseAt: { lte: new Date() } },
+      select: { id: true, landlordId: true, netAmount: true },
+    });
+
+    let released = 0;
+    for (const escrow of due) {
+      await this.wallet.releaseEscrow(escrow.id);
+      await this.prisma.notification.create({
+        data: {
+          userId: escrow.landlordId,
+          type: 'GENERAL',
+          title: 'Payment credited to your wallet',
+          body: `₦${escrow.netAmount.toLocaleString()} has been released to your Leadsage wallet.`,
+          data: { escrowId: escrow.id },
+        },
+      });
+      released++;
+    }
+
+    return { backfilled, released };
   }
 }

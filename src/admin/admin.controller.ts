@@ -287,4 +287,12 @@ export class AdminController {
   getSavingsPlanById(@Param('id') id: string) {
     return this.adminService.getSavingsPlanById(id);
   }
+
+  // ── Escrow utilities ────────────────────────────────────────────────────────
+
+  @Post('escrows/release-overdue')
+  @HttpCode(HttpStatus.OK)
+  releaseOverdueEscrows() {
+    return this.adminService.releaseOverdueEscrows();
+  }
 }

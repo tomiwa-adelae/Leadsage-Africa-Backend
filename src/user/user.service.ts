@@ -7,6 +7,7 @@ import {
 import { differenceInCalendarDays } from 'date-fns';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { PaystackService } from 'src/paystack/paystack.service';
+import { WalletService } from 'src/wallet/wallet.service';
 import { CreateApplicationDto } from './dto/create-application.dto';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { CreateTourRequestDto } from './dto/create-tour-request.dto';
@@ -18,6 +19,7 @@ export class UserService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly paystack: PaystackService,
+    private readonly wallet: WalletService,
   ) {}
 
   // ── Dashboard Stats ────────────────────────────────────────────────────────
@@ -1065,7 +1067,7 @@ export class UserService {
     const payment = await this.prisma.rentalPayment.findFirst({
       where: { userId, paystackRef: reference },
       include: {
-        listing: { select: { title: true, area: true, state: true } },
+        listing: { select: { title: true, area: true, state: true, landlordId: true } },
       },
     });
     if (!payment) throw new NotFoundException('Payment record not found');
@@ -1081,6 +1083,22 @@ export class UserService {
         listing: { select: { title: true, area: true, state: true } },
       },
     });
+
+    // Create escrow if the Paystack webhook hasn't already done so
+    const existingEscrow = await this.prisma.paymentEscrow.findFirst({
+      where: { rentalPaymentId: payment.id },
+    });
+    if (!existingEscrow) {
+      await this.wallet.createEscrowFromCard({
+        payerId: userId,
+        landlordId: payment.listing.landlordId,
+        amountNGN: payment.amount,
+        type: 'RENTAL_PAYMENT',
+        rentalPaymentId: payment.id,
+        paystackRef: reference,
+        releaseHoursFromNow: 24,
+      });
+    }
 
     return updated;
   }
