@@ -10,6 +10,6 @@ export default defineConfig({
     seed: "ts-node -r tsconfig-paths/register --transpile-only prisma/seed.ts",
   },
   datasource: {
-    url: process.env["DATABASE_URL"],
+    url: process.env["DIRECT_URL"] ?? process.env["DATABASE_URL"],
   },
 });

@@ -10,6 +10,7 @@ import {
 } from 'class-validator';
 
 export enum SavingsDurationDto {
+  SIX_MONTHS = 'SIX_MONTHS',
   ONE_YEAR = 'ONE_YEAR',
   TWO_YEARS = 'TWO_YEARS',
   UNTIL_GRADUATION = 'UNTIL_GRADUATION',
@@ -31,12 +32,22 @@ export enum SavingsPaymentMethodDto {
 export class CreateSavingsDto {
   @IsString()
   @IsNotEmpty()
+  schoolName: string;
+
+  @IsString()
+  @IsNotEmpty()
   academicLevel: string; // "100" | "200" | "300" | "400" | "500"
 
   @IsInt()
   @Min(2024)
   @Max(2040)
   expectedGradYear: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(12)
+  expectedGradMonth?: number;
 
   @IsEnum(SavingsDurationDto)
   duration: SavingsDurationDto;

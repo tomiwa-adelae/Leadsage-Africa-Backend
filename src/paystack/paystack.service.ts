@@ -15,6 +15,15 @@ interface VerifyResponse {
   paidAt: string | null;
   metadata: Record<string, any>;
   id: number; // Paystack transaction ID (for refund)
+  authorizationCode: string | null; // saved card token for recurring charges
+  customerEmail: string | null;
+}
+
+interface ChargeAuthResponse {
+  status: 'success' | 'failed' | 'abandoned' | 'pending';
+  reference: string;
+  amount: number; // in kobo
+  id: number;
 }
 
 @Injectable()
@@ -103,6 +112,35 @@ export class PaystackService {
       amount: data.amount, // kobo
       paidAt: data.paid_at ?? null,
       metadata: data.metadata ?? {},
+      id: data.id,
+      authorizationCode: data.authorization?.authorization_code ?? null,
+      customerEmail: data.customer?.email ?? null,
+    };
+  }
+
+  /**
+   * Charge a previously authorized card without requiring user interaction.
+   * Use `authorization_code` saved from a prior successful transaction.
+   */
+  async chargeAuthorization(
+    authorizationCode: string,
+    email: string,
+    amountNGN: number,
+    metadata: Record<string, any>,
+    reference?: string,
+  ): Promise<ChargeAuthResponse> {
+    const data = await this.request<any>('POST', '/transaction/charge_authorization', {
+      authorization_code: authorizationCode,
+      email,
+      amount: Math.round(amountNGN * 100),
+      metadata,
+      ...(reference ? { reference } : {}),
+    });
+
+    return {
+      status: data.status,
+      reference: data.reference,
+      amount: data.amount,
       id: data.id,
     };
   }

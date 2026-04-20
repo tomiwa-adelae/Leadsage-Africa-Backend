@@ -38,7 +38,7 @@ export class SavingsService {
 
   async createPlan(userId: string, dto: CreateSavingsDto): Promise<FirstKeySavings> {
     const startDate = new Date();
-    const endDate = this.computeEndDate(dto.duration, dto.expectedGradYear, startDate);
+    const endDate = this.computeEndDate(dto.duration, dto.expectedGradYear, startDate, dto.expectedGradMonth);
     const nextContributionAt = this.computeNextContribution(dto.frequency, dto.preferredDay, startDate);
 
     // Provision a dedicated Anchor virtual account for this savings plan
@@ -80,8 +80,10 @@ export class SavingsService {
     const plan = await this.prisma.firstKeySavings.create({
       data: {
         userId,
+        schoolName: dto.schoolName,
         academicLevel: dto.academicLevel,
         expectedGradYear: dto.expectedGradYear,
+        expectedGradMonth: dto.expectedGradMonth,
         duration: dto.duration,
         contributionAmount: dto.contributionAmount,
         frequency: dto.frequency,
@@ -292,6 +294,14 @@ export class SavingsService {
       select: { id: true },
     });
     if (alreadyRecorded) return { success: true, alreadyVerified: true };
+
+    // Save authorization_code for future recurring card charges
+    if (result.authorizationCode && !plan.cardAuthCode) {
+      await this.prisma.firstKeySavings.update({
+        where: { id: planId },
+        data: { cardAuthCode: result.authorizationCode },
+      });
+    }
 
     await this.recordDeposit(plan, amount, reference, 'Card deposit');
 
@@ -585,56 +595,119 @@ export class SavingsService {
     const plans = await this.prisma.firstKeySavings.findMany({
       where: {
         status: 'ACTIVE',
-        paymentMethod: 'WALLET',
+        paymentMethod: { in: ['WALLET', 'CARD'] },
         nextContributionAt: { lte: now },
       },
     });
 
     for (const plan of plans) {
       try {
-        // Check wallet balance
-        const walletAccount = await this.prisma.walletAccount.findUnique({
-          where: { userId: plan.userId },
-        });
-
-        if (!walletAccount || walletAccount.availableBalance < plan.contributionAmount) {
-          // Notify insufficient balance
-          await this.prisma.notification.create({
-            data: {
-              userId: plan.userId,
-              type: 'GENERAL',
-              title: 'FirstKey auto-save failed',
-              body: `Insufficient wallet balance for your FirstKey contribution of ₦${plan.contributionAmount.toLocaleString()}. Please fund your wallet.`,
-              data: { savingsId: plan.id },
-            },
-          });
-          continue;
+        if (plan.paymentMethod === 'CARD') {
+          await this.processCardContribution(plan, now);
+        } else {
+          await this.processWalletContribution(plan, now);
         }
-
-        const reference = `fks-auto-${plan.id}-${now.getTime()}`;
-        await this.wallet.debitWallet(
-          plan.userId,
-          plan.contributionAmount,
-          `FirstKey auto-save — ${plan.planName ?? 'Savings Plan'}`,
-          { type: 'DEBIT', reference },
-        );
-
-        await this.recordDeposit(plan, plan.contributionAmount, reference, 'Auto-save contribution');
-
-        this.sendSavingsEmail(
-          plan.userId,
-          `FirstKey auto-save — ₦${plan.contributionAmount.toLocaleString()} saved`,
-          `<p>Hi there,</p>
-           <p>Your scheduled auto-save of <strong>₦${plan.contributionAmount.toLocaleString()}</strong> has been added to your <strong>${plan.planName ?? 'FirstKey'}</strong> savings plan.</p>
-           <p>Your savings continue to earn <strong>12% interest per annum</strong>, compounded daily.</p>
-           <p>— Leadsage Africa</p>`,
-        );
       } catch (e) {
         this.logger.error(`Auto-contribution failed for plan ${plan.id}: ${e}`);
       }
     }
 
     this.logger.log(`Processed ${plans.length} scheduled contributions`);
+  }
+
+  private async processWalletContribution(plan: FirstKeySavings, now: Date) {
+    const walletAccount = await this.prisma.walletAccount.findUnique({
+      where: { userId: plan.userId },
+    });
+
+    if (!walletAccount || walletAccount.availableBalance < plan.contributionAmount) {
+      await this.prisma.notification.create({
+        data: {
+          userId: plan.userId,
+          type: 'GENERAL',
+          title: 'FirstKey auto-save failed',
+          body: `Insufficient wallet balance for your FirstKey contribution of ₦${plan.contributionAmount.toLocaleString()}. Please fund your wallet.`,
+          data: { savingsId: plan.id },
+        },
+      });
+      return;
+    }
+
+    const reference = `fks-auto-${plan.id}-${now.getTime()}`;
+    await this.wallet.debitWallet(
+      plan.userId,
+      plan.contributionAmount,
+      `FirstKey auto-save — ${plan.planName ?? 'Savings Plan'}`,
+      { type: 'DEBIT', reference },
+    );
+
+    await this.recordDeposit(plan, plan.contributionAmount, reference, 'Auto-save contribution');
+
+    this.sendSavingsEmail(
+      plan.userId,
+      `FirstKey auto-save — ₦${plan.contributionAmount.toLocaleString()} saved`,
+      `<p>Hi there,</p>
+       <p>Your scheduled auto-save of <strong>₦${plan.contributionAmount.toLocaleString()}</strong> has been added to your <strong>${plan.planName ?? 'FirstKey'}</strong> savings plan.</p>
+       <p>Your savings continue to earn <strong>12% interest per annum</strong>, compounded daily.</p>
+       <p>— Leadsage Africa</p>`,
+    );
+  }
+
+  private async processCardContribution(plan: FirstKeySavings, now: Date) {
+    if (!plan.cardAuthCode) {
+      // No saved card — notify user to make a manual card payment to register their card
+      await this.prisma.notification.create({
+        data: {
+          userId: plan.userId,
+          type: 'GENERAL',
+          title: 'FirstKey auto-save: card not set up',
+          body: `Your FirstKey plan uses card auto-save but no card is registered. Please make a manual card deposit to activate auto-save.`,
+          data: { savingsId: plan.id },
+        },
+      });
+      return;
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: plan.userId },
+      select: { email: true },
+    });
+    if (!user) return;
+
+    const reference = `fks-card-auto-${plan.id}-${now.getTime()}`;
+
+    const result = await this.paystack.chargeAuthorization(
+      plan.cardAuthCode,
+      user.email,
+      plan.contributionAmount,
+      { savingsPlanId: plan.id, userId: plan.userId, type: 'savings_auto_debit' },
+      reference,
+    );
+
+    if (result.status !== 'success') {
+      await this.prisma.notification.create({
+        data: {
+          userId: plan.userId,
+          type: 'GENERAL',
+          title: 'FirstKey card auto-save failed',
+          body: `We could not charge your card ₦${plan.contributionAmount.toLocaleString()} for your FirstKey plan. Please check your card or switch to wallet auto-save.`,
+          data: { savingsId: plan.id },
+        },
+      });
+      return;
+    }
+
+    const amount = result.amount / 100;
+    await this.recordDeposit(plan, amount, reference, 'Card auto-save');
+
+    this.sendSavingsEmail(
+      plan.userId,
+      `FirstKey card auto-save — ₦${amount.toLocaleString()} saved`,
+      `<p>Hi there,</p>
+       <p>Your scheduled card charge of <strong>₦${amount.toLocaleString()}</strong> has been added to your <strong>${plan.planName ?? 'FirstKey'}</strong> savings plan.</p>
+       <p>Your savings continue to earn <strong>12% interest per annum</strong>, compounded daily.</p>
+       <p>— Leadsage Africa</p>`,
+    );
   }
 
   // ── Cron: Mature Plans ──────────────────────────────────────────────────────
@@ -754,11 +827,14 @@ export class SavingsService {
     duration: string,
     expectedGradYear: number,
     from: Date,
+    expectedGradMonth?: number,
   ): Date {
+    if (duration === 'SIX_MONTHS') return addMonths(from, 6);
     if (duration === 'ONE_YEAR') return addYears(from, 1);
     if (duration === 'TWO_YEARS') return addYears(from, 2);
-    // UNTIL_GRADUATION — end of expected grad year (July, typical Nigerian academic calendar)
-    return new Date(expectedGradYear, 6, 31); // July 31
+    // UNTIL_GRADUATION — last day of the chosen grad month (default: July)
+    const month = expectedGradMonth ?? 7; // 1-indexed
+    return new Date(expectedGradYear, month, 0); // day 0 = last day of previous month
   }
 
   private computeNextContribution(

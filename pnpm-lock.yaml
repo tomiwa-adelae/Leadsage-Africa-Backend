@@ -42,7 +42,7 @@ importers:
         specifier: ^7.4.1
         version: 7.7.0
       '@prisma/client':
-        specifier: ^7.4.1
+        specifier: ^7.7.0
         version: 7.7.0(prisma@7.7.0(@types/react@19.2.14)(react-dom@19.2.5(react@19.2.5))(react@19.2.5)(typescript@5.9.3))(typescript@5.9.3)
       bcryptjs:
         specifier: ^3.0.3
@@ -148,7 +148,7 @@ importers:
         specifier: ^3.4.2
         version: 3.8.1
       prisma:
-        specifier: ^7.4.1
+        specifier: ^7.7.0
         version: 7.7.0(@types/react@19.2.14)(react-dom@19.2.5(react@19.2.5))(react@19.2.5)(typescript@5.9.3)
       source-map-support:
         specifier: ^0.5.21

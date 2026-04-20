@@ -41,9 +41,9 @@ model User {
   accountStatusUpdatedAt DateTime?
 
   // Onboarding profile fields
-  dob            String?
-  nin            String?
-  ninVerified    Boolean  @default(false)
+  dob         String?
+  nin         String?
+  ninVerified Boolean @default(false)
 
   // Renter preferences (CLIENT)
   budgetMin              Int?
@@ -67,21 +67,21 @@ model User {
 
   provider String @default("local")
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  admin         Admin?
-  listings      Listing[]
-  savedListings SavedListing[]
-  applications  Application[]
-  bookings      Booking[]
-  notifications Notification[]
-  tourRequests  TourRequest[]  @relation("TourUser")
-  agentTours    TourRequest[]  @relation("TourAgent")
-  rentalPayments RentalPayment[] @relation("RentalPaymentUser")
-  wallet        WalletAccount?
-  walletTxs     WalletTransaction[]
-  escrowsAsLandlord PaymentEscrow[] @relation("EscrowLandlord")
-  firstKeySavings FirstKeySavings[]
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  admin             Admin?
+  listings          Listing[]
+  savedListings     SavedListing[]
+  applications      Application[]
+  bookings          Booking[]
+  notifications     Notification[]
+  tourRequests      TourRequest[]       @relation("TourUser")
+  agentTours        TourRequest[]       @relation("TourAgent")
+  rentalPayments    RentalPayment[]     @relation("RentalPaymentUser")
+  wallet            WalletAccount?
+  walletTxs         WalletTransaction[]
+  escrowsAsLandlord PaymentEscrow[]     @relation("EscrowLandlord")
+  firstKeySavings   FirstKeySavings[]
 }
 
 enum AdminPosition {
@@ -119,57 +119,57 @@ model SavedListing {
 }
 
 model Application {
-  id        String            @id @default(uuid())
-  userId    String
-  listingId String
-  status    ApplicationStatus @default(PENDING)
-  message   String?
+  id         String            @id @default(uuid())
+  userId     String
+  listingId  String
+  status     ApplicationStatus @default(PENDING)
+  message    String?
   moveInDate DateTime?
 
   landlordNote String?
   reviewedAt   DateTime?
 
   // Screening fields (filled during full application after tour)
-  tourRequestId    String?   @unique
+  tourRequestId        String?   @unique
   screeningSubmittedAt DateTime?
 
   // Identity
-  nin              String?
-  ninVerified      Boolean   @default(false)
-  ninVerifiedAt    DateTime?
+  nin           String?
+  ninVerified   Boolean   @default(false)
+  ninVerifiedAt DateTime?
 
   // Employment
-  employmentStatus String?   // "employed" | "self-employed" | "student" | "unemployed"
+  employmentStatus String? // "employed" | "self-employed" | "student" | "unemployed"
   employer         String?
   jobTitle         String?
   monthlyIncome    Float?
   employmentDocUrl String?
 
   // References
-  ref1Name         String?
-  ref1Phone        String?
-  ref1Relation     String?
-  ref2Name         String?
-  ref2Phone        String?
-  ref2Relation     String?
+  ref1Name     String?
+  ref1Phone    String?
+  ref1Relation String?
+  ref2Name     String?
+  ref2Phone    String?
+  ref2Relation String?
 
   // Tenancy intent
-  tenancyMonths    Int?
-  reasonForMoving  String?
+  tenancyMonths   Int?
+  reasonForMoving String?
 
   // Admin review (separate from landlord)
-  adminNote        String?
-  adminStatus      String?   // "PENDING" | "APPROVED" | "REJECTED"
-  adminReviewedAt  DateTime?
+  adminNote       String?
+  adminStatus     String? // "PENDING" | "APPROVED" | "REJECTED"
+  adminReviewedAt DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
-  listing      Listing          @relation(fields: [listingId], references: [id], onDelete: Cascade)
-  tourRequest  TourRequest?     @relation(fields: [tourRequestId], references: [id])
-  agreement    RentalAgreement?
-  payments     RentalPayment[]
+  user        User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listing     Listing          @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  tourRequest TourRequest?     @relation(fields: [tourRequestId], references: [id])
+  agreement   RentalAgreement?
+  payments    RentalPayment[]
 
   @@unique([userId, listingId])
 }
@@ -183,28 +183,28 @@ enum ApplicationStatus {
 }
 
 model TourRequest {
-  id          String     @id @default(uuid())
-  listingId   String
-  userId      String
-  agentId     String?    // Leadsage agent assigned to conduct tour
+  id        String  @id @default(uuid())
+  listingId String
+  userId    String
+  agentId   String? // Leadsage agent assigned to conduct tour
 
-  status      TourStatus @default(PENDING)
+  status        TourStatus @default(PENDING)
   preferredDate DateTime?
-  notes       String?    // renter's notes
+  notes         String? // renter's notes
 
-  scheduledAt DateTime?
-  agentNotes  String?
-  adminNotes  String?
-  completedAt DateTime?
-  cancelledAt DateTime?
+  scheduledAt  DateTime?
+  agentNotes   String?
+  adminNotes   String?
+  completedAt  DateTime?
+  cancelledAt  DateTime?
   cancelReason String?
 
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  listing     Listing    @relation(fields: [listingId], references: [id], onDelete: Cascade)
-  user        User       @relation("TourUser", fields: [userId], references: [id], onDelete: Cascade)
-  agent       User?      @relation("TourAgent", fields: [agentId], references: [id])
+  listing     Listing      @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  user        User         @relation("TourUser", fields: [userId], references: [id], onDelete: Cascade)
+  agent       User?        @relation("TourAgent", fields: [agentId], references: [id])
   application Application?
 }
 
@@ -216,19 +216,19 @@ enum TourStatus {
 }
 
 model RentalAgreement {
-  id            String          @id @default(uuid())
-  applicationId String          @unique
+  id            String @id @default(uuid())
+  applicationId String @unique
   listingId     String
   tenantId      String
   landlordId    String
 
   // Auto-generated HTML content
-  content       String          @db.Text
+  content String @db.Text
 
   // Tenant e-signature
-  tenantSignedAt    DateTime?
-  tenantSignature   String?     // typed full name
-  tenantIpAddress   String?
+  tenantSignedAt  DateTime?
+  tenantSignature String? // typed full name
+  tenantIpAddress String?
 
   // Landlord e-signature
   landlordSignedAt  DateTime?
@@ -242,14 +242,14 @@ model RentalAgreement {
   cautionFee    Float?
   serviceCharge Float?
 
-  status        AgreementStatus @default(PENDING_TENANT)
+  status AgreementStatus @default(PENDING_TENANT)
 
-  createdAt     DateTime        @default(now())
-  updatedAt     DateTime        @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  application   Application     @relation(fields: [applicationId], references: [id], onDelete: Cascade)
-  listing       Listing         @relation(fields: [listingId], references: [id])
-  payments      RentalPayment[]
+  application Application     @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  listing     Listing         @relation(fields: [listingId], references: [id])
+  payments    RentalPayment[]
 }
 
 enum AgreementStatus {
@@ -260,31 +260,31 @@ enum AgreementStatus {
 }
 
 model RentalPayment {
-  id              String              @id @default(uuid())
-  applicationId   String
-  agreementId     String?
-  userId          String
-  listingId       String
+  id            String  @id @default(uuid())
+  applicationId String
+  agreementId   String?
+  userId        String
+  listingId     String
 
-  amount          Float
-  dueDate         DateTime
-  installmentNo   Int?
+  amount            Float
+  dueDate           DateTime
+  installmentNo     Int?
   totalInstallments Int?
 
-  paymentRef      String?
-  paystackRef     String?
-  paidAt          DateTime?
+  paymentRef  String?
+  paystackRef String?
+  paidAt      DateTime?
 
-  status          RentalPaymentStatus @default(PENDING)
+  status RentalPaymentStatus @default(PENDING)
 
-  createdAt       DateTime            @default(now())
-  updatedAt       DateTime            @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  application     Application         @relation(fields: [applicationId], references: [id], onDelete: Cascade)
-  agreement       RentalAgreement?    @relation(fields: [agreementId], references: [id])
-  user            User                @relation("RentalPaymentUser", fields: [userId], references: [id])
-  listing         Listing             @relation(fields: [listingId], references: [id])
-  escrow          PaymentEscrow?
+  application Application      @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  agreement   RentalAgreement? @relation(fields: [agreementId], references: [id])
+  user        User             @relation("RentalPaymentUser", fields: [userId], references: [id])
+  listing     Listing          @relation(fields: [listingId], references: [id])
+  escrow      PaymentEscrow?
 }
 
 enum RentalPaymentStatus {
@@ -321,26 +321,26 @@ model Booking {
   cancelReason String?
 
   // Check-in instructions (filled by landlord after confirmation)
-  keyHandover    String?   // e.g. "Lockbox at gate", "Meet agent", "Caretaker will assist"
-  accessCode     String?   // Gate / door code
-  checkInWindow  String?   // e.g. "2:00 PM – 10:00 PM"
-  checkOutTime   String?   // e.g. "11:00 AM"
-  directions     String?   // Landmark-based directions
-  mapLink        String?   // Google Maps pin URL
-  wifiName       String?
-  wifiPassword   String?
-  houseRules     String?
-  emergencyContact String? // Name + phone of caretaker / agent
-  generatorInfo  String?   // Generator hours / fuel arrangement
-  waterInfo      String?   // Borehole, tank schedule, etc.
-  securityInfo   String?   // Estate / security entry protocol
+  keyHandover             String? // e.g. "Lockbox at gate", "Meet agent", "Caretaker will assist"
+  accessCode              String? // Gate / door code
+  checkInWindow           String? // e.g. "2:00 PM – 10:00 PM"
+  checkOutTime            String? // e.g. "11:00 AM"
+  directions              String? // Landmark-based directions
+  mapLink                 String? // Google Maps pin URL
+  wifiName                String?
+  wifiPassword            String?
+  houseRules              String?
+  emergencyContact        String? // Name + phone of caretaker / agent
+  generatorInfo           String? // Generator hours / fuel arrangement
+  waterInfo               String? // Borehole, tank schedule, etc.
+  securityInfo            String? // Estate / security entry protocol
   instructionsPublishedAt DateTime? // Set when landlord saves instructions
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  listing Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  user    User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listing Listing        @relation(fields: [listingId], references: [id], onDelete: Cascade)
   escrow  PaymentEscrow?
 }
 
@@ -381,16 +381,16 @@ enum NotificationType {
 }
 
 model Listing {
-  id         String   @id @default(uuid())
+  id         String @id @default(uuid())
   landlordId String
-  landlord   User     @relation(fields: [landlordId], references: [id])
+  landlord   User   @relation(fields: [landlordId], references: [id])
 
   // Basic info
-  slug             String?     @unique
-  listingType      ListingType
-  title            String
-  summary          String?
-  description      String      // TipTap JSON string
+  slug        String?     @unique
+  listingType ListingType
+  title       String
+  summary     String?
+  description String // TipTap JSON string
 
   // Location
   state   String
@@ -417,9 +417,9 @@ model Listing {
   minimumNights Int?
 
   // Amenities & rules
-  amenities      String[]  @default([])
-  petFriendly    Boolean   @default(false)
-  smokingAllowed Boolean   @default(false)
+  amenities      String[] @default([])
+  petFriendly    Boolean  @default(false)
+  smokingAllowed Boolean  @default(false)
   availableFrom  DateTime
 
   // Media
@@ -439,12 +439,12 @@ model Listing {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  savedBy         SavedListing[]
-  applications    Application[]
-  bookings        Booking[]
-  tourRequests    TourRequest[]
+  savedBy          SavedListing[]
+  applications     Application[]
+  bookings         Booking[]
+  tourRequests     TourRequest[]
   rentalAgreements RentalAgreement[]
-  rentalPayments  RentalPayment[]
+  rentalPayments   RentalPayment[]
 }
 
 // ── Listing enums ─────────────────────────────────────────────────────────────
@@ -505,8 +505,8 @@ model WalletAccount {
   userId String @unique
 
   // Anchor identifiers
-  anchorCustomerId String?
-  anchorAccountId  String? @unique
+  anchorCustomerId   String?
+  anchorAccountId    String? @unique
   virtualAccountNo   String? // NUBAN shown to user
   virtualAccountName String? // account name as returned by Anchor
   virtualBankName    String? // e.g. "Wema Bank"
@@ -530,7 +530,7 @@ model WalletAccount {
 }
 
 model WalletTransaction {
-  id              String @id @default(uuid())
+  id              String  @id @default(uuid())
   userId          String
   walletAccountId String?
 
@@ -538,7 +538,7 @@ model WalletTransaction {
   amount       Float
   balanceAfter Float
   description  String
-  reference    String? @unique // Anchor or internal ref
+  reference    String?      @unique // Anchor or internal ref
   anchorRef    String?
 
   // What triggered this tx
@@ -557,22 +557,22 @@ model PaymentEscrow {
   id String @id @default(uuid())
 
   // Who is involved
-  payerId    String  // tenant / guest
-  landlordId String  // who receives after hold
+  payerId    String // tenant / guest
+  landlordId String // who receives after hold
 
-  amount       Float
-  commission   Float  // 5% Leadsage fee
-  netAmount    Float  // amount - commission
+  amount     Float
+  commission Float // 5% Leadsage fee
+  netAmount  Float // amount - commission
 
   // What is this for
-  type        EscrowType
-  bookingId      String? @unique
-  rentalPaymentId String? @unique
+  type            EscrowType
+  bookingId       String?    @unique
+  rentalPaymentId String?    @unique
 
   // Timing
-  releaseAt DateTime // when to release to landlord
+  releaseAt  DateTime // when to release to landlord
   releasedAt DateTime?
-  status    EscrowStatus @default(HOLDING)
+  status     EscrowStatus @default(HOLDING)
 
   // Funding source
   fundedByCard   Boolean @default(false)
@@ -596,13 +596,13 @@ enum WalletKycStatus {
 }
 
 enum WalletTxType {
-  CREDIT         // money came in (bank transfer, card payment redistributed)
-  DEBIT          // money went out (payment, withdrawal)
-  ESCROW_HOLD    // money moved to escrow (landlord pending)
+  CREDIT // money came in (bank transfer, card payment redistributed)
+  DEBIT // money went out (payment, withdrawal)
+  ESCROW_HOLD // money moved to escrow (landlord pending)
   ESCROW_RELEASE // escrow released to available
-  WITHDRAWAL     // NIP transfer out to bank
-  COMMISSION     // 5% deducted
-  REFUND         // money returned
+  WITHDRAWAL // NIP transfer out to bank
+  COMMISSION // 5% deducted
+  REFUND // money returned
 }
 
 enum EscrowType {
@@ -624,8 +624,10 @@ model FirstKeySavings {
   userId String
 
   // Academic context
-  academicLevel    String // "100" | "200" | "300" | "400" | "500"
-  expectedGradYear Int    // e.g. 2027
+  schoolName        String @default("covenant_university") // e.g. "covenant_university"
+  academicLevel     String // "100" | "200" | "300" | "400" | "500"
+  expectedGradYear  Int    // e.g. 2027
+  expectedGradMonth Int?   // 1-12; required when duration = UNTIL_GRADUATION
 
   // Plan configuration
   planName           String?
@@ -634,7 +636,7 @@ model FirstKeySavings {
   duration           SavingsDuration
   contributionAmount Float
   frequency          SavingsFrequency
-  preferredDay       Int?    // 0-6 for weekly (Mon=1), 1-31 for monthly
+  preferredDay       Int? // 0-6 for weekly (Mon=1), 1-31 for monthly
   preferredTime      String? // "09:00" HH:mm
   startDate          DateTime
   endDate            DateTime // maturity date
@@ -678,8 +680,8 @@ model SavingsTransaction {
 
   type          SavingsTxType
   amount        Float
-  balance       Float   // running principal balance after this tx
-  reference     String? @unique
+  balance       Float // running principal balance after this tx
+  reference     String?       @unique
   note          String?
   penaltyAmount Float?
 
@@ -689,6 +691,7 @@ model SavingsTransaction {
 }
 
 enum SavingsDuration {
+  SIX_MONTHS
   ONE_YEAR
   TWO_YEARS
   UNTIL_GRADUATION
