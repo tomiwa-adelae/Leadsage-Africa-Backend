@@ -18,6 +18,7 @@ import { notDeleted } from 'src/utils/prismaFilters';
 import { RegisterUserDto } from './dto/register-user.dto';
 import { WelcomeEmail } from 'emails/welcome-email';
 import { ForgotPasswordEmail } from 'emails/forgot-password-email';
+import { VerifyEmailEmail } from 'emails/verify-email';
 import { MailService } from 'src/mail/mail.service';
 import { OnboardingDto } from './dto/onboarding.dto';
 
@@ -202,16 +203,81 @@ export class AuthService {
     // Provision wallet (locked until KYC)
     await this.wallet.provisionWallet(user.id).catch(() => {});
 
-    // Welcome email → new user
-    await this.mail.sendMail({
-      toEmail: user.email,
-      toName: user.firstName ?? '',
-      subject: `Welcome to Leadsage, ${user.firstName}!`,
-      html: WelcomeEmail({ firstName: user.firstName ?? '' }),
+    // Send email verification OTP
+    await this.sendEmailVerificationOTP(user.email, user.firstName ?? '');
+
+    return { email: user.email, message: `Account created! Check your email for a verification code.` };
+  }
+
+  async sendEmailVerificationOTP(email: string, firstName?: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { email, ...notDeleted() },
     });
 
-    const { password, refreshToken, ...result } = user;
-    return this.login(result);
+    if (!user) throw new NotFoundException('No account with that email');
+    if (user.emailVerified)
+      throw new BadRequestException('Email is already verified');
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiry = new Date(Date.now() + 10 * 60 * 1000);
+    const hashedOTP = await bcrypt.hash(otp, 10);
+
+    await this.prisma.user.update({
+      where: { email },
+      data: {
+        emailVerificationOTP: hashedOTP,
+        emailVerificationOTPExpiry: expiry,
+      },
+    });
+
+    await this.mail.sendMail({
+      toEmail: email,
+      toName: firstName ?? user.firstName ?? '',
+      subject: `Your Leadsage verification code`,
+      html: VerifyEmailEmail({
+        firstName: firstName ?? user.firstName ?? '',
+        otp,
+      }),
+    });
+
+    return { message: 'Verification code sent to your email' };
+  }
+
+  async verifyEmailOTP(email: string, otp: string, res: any) {
+    const user = await this.prisma.user.findUnique({
+      where: { email, ...notDeleted() },
+    });
+
+    if (!user) throw new NotFoundException('No account with that email');
+    if (user.emailVerified)
+      throw new BadRequestException('Email is already verified');
+    if (!user.emailVerificationOTP)
+      throw new UnauthorizedException('Invalid or expired code');
+    if (user.emailVerificationOTPExpiry! < new Date())
+      throw new UnauthorizedException('Verification code has expired');
+
+    const isValid = await bcrypt.compare(otp, user.emailVerificationOTP);
+    if (!isValid) throw new UnauthorizedException('Invalid verification code');
+
+    const updatedUser = await this.prisma.user.update({
+      where: { email },
+      data: {
+        emailVerified: true,
+        emailVerificationOTP: null,
+        emailVerificationOTPExpiry: null,
+      },
+    });
+
+    // Send welcome email now that email is confirmed
+    await this.mail.sendMail({
+      toEmail: updatedUser.email,
+      toName: updatedUser.firstName ?? '',
+      subject: `Welcome to Leadsage, ${updatedUser.firstName}!`,
+      html: WelcomeEmail({ firstName: updatedUser.firstName ?? '' }),
+    });
+
+    const { password, refreshToken, ...safeUser } = updatedUser;
+    return this.login(safeUser);
   }
 
   async registerAdmin(registerUserDto: RegisterUserDto) {

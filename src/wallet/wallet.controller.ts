@@ -56,6 +56,31 @@ export class WalletController {
     );
   }
 
+  // ── Transaction PIN ────────────────────────────────────────────────────────
+
+  @Post('set-pin')
+  @HttpCode(HttpStatus.OK)
+  setPin(
+    @CurrentUser() user: { id: string },
+    @Body() body: { pin: string; confirmPin: string },
+  ) {
+    return this.walletService.setTransactionPin(user.id, body.pin, body.confirmPin);
+  }
+
+  @Post('change-pin')
+  @HttpCode(HttpStatus.OK)
+  changePin(
+    @CurrentUser() user: { id: string },
+    @Body() body: { currentPin: string; newPin: string; confirmPin: string },
+  ) {
+    return this.walletService.changeTransactionPin(
+      user.id,
+      body.currentPin,
+      body.newPin,
+      body.confirmPin,
+    );
+  }
+
   // ── Payments from wallet ───────────────────────────────────────────────────
 
   @Post('pay/rent/:rentalPaymentId')
@@ -63,8 +88,9 @@ export class WalletController {
   payRent(
     @CurrentUser() user: { id: string },
     @Param('rentalPaymentId') rentalPaymentId: string,
+    @Body() body: { pin: string },
   ) {
-    return this.walletService.payRentFromWallet(user.id, rentalPaymentId);
+    return this.walletService.payRentFromWallet(user.id, rentalPaymentId, body.pin);
   }
 
   @Post('pay/booking/:bookingId')
@@ -72,8 +98,9 @@ export class WalletController {
   payBooking(
     @CurrentUser() user: { id: string },
     @Param('bookingId') bookingId: string,
+    @Body() body: { pin: string },
   ) {
-    return this.walletService.payBookingFromWallet(user.id, bookingId);
+    return this.walletService.payBookingFromWallet(user.id, bookingId, body.pin);
   }
 
   // ── Withdrawal ─────────────────────────────────────────────────────────────
@@ -94,6 +121,7 @@ export class WalletController {
       bankAccountNumber: string;
       bankCode: string;
       bankAccountName: string;
+      pin: string;
     },
   ) {
     return this.walletService.requestWithdrawal(
@@ -102,6 +130,7 @@ export class WalletController {
       body.bankAccountNumber,
       body.bankCode,
       body.bankAccountName,
+      body.pin,
     );
   }
 }

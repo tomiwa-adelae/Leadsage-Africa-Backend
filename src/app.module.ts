@@ -14,6 +14,7 @@ import { TasksModule } from './tasks/tasks.module';
 import { AnchorModule } from './anchor/anchor.module';
 import { WalletModule } from './wallet/wallet.module';
 import { SavingsModule } from './savings/savings.module';
+import { UploadModule } from './upload/upload.module';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { SavingsModule } from './savings/savings.module';
     LandlordModule,
     WebhooksModule,
     TasksModule,
+    UploadModule,
   ],
   controllers: [AppController],
   providers: [AppService],

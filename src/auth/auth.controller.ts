@@ -62,14 +62,19 @@ export class AuthController {
 
   @Post('register')
   @HttpCode(HttpStatus.CREATED)
-  async registerUser(
-    @Body() registerUser: RegisterUserDto,
+  async registerUser(@Body() registerUser: RegisterUserDto) {
+    await this.authService.verifyTurnstile(registerUser.turnstileToken);
+    return this.authService.register(registerUser);
+  }
+
+  @Post('verify-email')
+  @HttpCode(HttpStatus.OK)
+  async verifyEmail(
+    @Body() body: { email: string; otp: string },
     @Res() res: Response,
   ) {
-    await this.authService.verifyTurnstile(registerUser.turnstileToken);
-
     const { access_token, refresh_token, user } =
-      await this.authService.register(registerUser);
+      await this.authService.verifyEmailOTP(body.email, body.otp, res);
 
     const cookieOptions = this.authService.getCookieOptions();
     const sessionMs = this.authService.getSessionMs();
@@ -85,6 +90,12 @@ export class AuthController {
     });
 
     return res.json({ user, message: `Welcome to Leadsage, ${user.firstName}` });
+  }
+
+  @Post('resend-email-verification')
+  @HttpCode(HttpStatus.OK)
+  async resendEmailVerification(@Body() body: { email: string }) {
+    return this.authService.sendEmailVerificationOTP(body.email);
   }
 
   @Post('logout')

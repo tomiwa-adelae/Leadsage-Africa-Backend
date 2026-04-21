@@ -3,7 +3,9 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
+import * as bcrypt from 'bcryptjs';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { AnchorService } from 'src/anchor/anchor.service';
 import { randomUUID } from 'crypto';
@@ -112,9 +114,60 @@ export class WalletService {
 
   async getWallet(userId: string) {
     const wallet = await this.prisma.walletAccount.findUnique({ where: { userId } });
-    if (wallet) return wallet;
-    // Auto-provision for users who registered before the wallet feature
-    return this.prisma.walletAccount.create({ data: { userId } });
+    const record = wallet ?? await this.prisma.walletAccount.create({ data: { userId } });
+    const { transactionPin: _, ...safe } = record;
+    return safe;
+  }
+
+  // ── Transaction PIN ────────────────────────────────────────────────────────
+
+  private async checkPin(userId: string, pin: string) {
+    const wallet = await this.prisma.walletAccount.findUnique({ where: { userId } });
+    if (!wallet) throw new NotFoundException('Wallet not found');
+    if (!wallet.transactionPinSet || !wallet.transactionPin)
+      throw new BadRequestException('Transaction PIN not set');
+    const valid = await bcrypt.compare(pin, wallet.transactionPin);
+    if (!valid) throw new UnauthorizedException('Incorrect transaction PIN');
+  }
+
+  async setTransactionPin(userId: string, pin: string, confirmPin: string) {
+    if (pin !== confirmPin)
+      throw new BadRequestException('PINs do not match');
+    if (!/^\d{4}$/.test(pin))
+      throw new BadRequestException('PIN must be exactly 4 digits');
+
+    const wallet = await this.prisma.walletAccount.findUnique({ where: { userId } });
+    if (!wallet) throw new NotFoundException('Wallet not found');
+    if (wallet.transactionPinSet)
+      throw new BadRequestException('Transaction PIN already set. Use change-pin to update it.');
+
+    const hashed = await bcrypt.hash(pin, 10);
+    await this.prisma.walletAccount.update({
+      where: { userId },
+      data: { transactionPin: hashed, transactionPinSet: true },
+    });
+    return { message: 'Transaction PIN set successfully' };
+  }
+
+  async changeTransactionPin(
+    userId: string,
+    currentPin: string,
+    newPin: string,
+    confirmPin: string,
+  ) {
+    if (newPin !== confirmPin)
+      throw new BadRequestException('New PINs do not match');
+    if (!/^\d{4}$/.test(newPin))
+      throw new BadRequestException('PIN must be exactly 4 digits');
+
+    await this.checkPin(userId, currentPin);
+
+    const hashed = await bcrypt.hash(newPin, 10);
+    await this.prisma.walletAccount.update({
+      where: { userId },
+      data: { transactionPin: hashed },
+    });
+    return { message: 'Transaction PIN updated successfully' };
   }
 
   async getPendingEscrows(landlordId: string) {
@@ -445,7 +498,8 @@ export class WalletService {
 
   // ── Wallet-pay for rent ────────────────────────────────────────────────────
 
-  async payRentFromWallet(userId: string, rentalPaymentId: string) {
+  async payRentFromWallet(userId: string, rentalPaymentId: string, pin: string) {
+    await this.checkPin(userId, pin);
     const payment = await this.prisma.rentalPayment.findFirst({
       where: { id: rentalPaymentId, userId },
       include: {
@@ -474,7 +528,8 @@ export class WalletService {
 
   // ── Wallet-pay for shortlet booking ───────────────────────────────────────
 
-  async payBookingFromWallet(userId: string, bookingId: string) {
+  async payBookingFromWallet(userId: string, bookingId: string, pin: string) {
+    await this.checkPin(userId, pin);
     const booking = await this.prisma.booking.findFirst({
       where: { id: bookingId, userId },
       include: {
@@ -521,7 +576,10 @@ export class WalletService {
     bankAccountNumber: string,
     bankCode: string,
     bankAccountName: string,
+    pin: string,
   ) {
+    await this.checkPin(userId, pin);
+
     const wallet = await this.prisma.walletAccount.findUnique({ where: { userId } });
     if (!wallet) throw new NotFoundException('Wallet not found');
     if (!wallet.isActive) throw new BadRequestException('Complete KYC before withdrawing');
