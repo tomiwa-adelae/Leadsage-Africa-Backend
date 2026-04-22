@@ -39,4 +39,14 @@ export class UploadController {
     const url = await this.uploadService.uploadEventCover(file);
     return { url };
   }
+
+  @Post('blog-cover')
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 10 * 1024 * 1024 } }))
+  async uploadBlogCover(@UploadedFile() file: Express.Multer.File) {
+    if (!file) throw new BadRequestException('No file uploaded');
+    if (!ALLOWED_IMAGE_TYPES.includes(file.mimetype))
+      throw new BadRequestException('Only JPEG, PNG, or WEBP images are allowed');
+    const url = await this.uploadService.uploadBlogCover(file);
+    return { url };
+  }
 }

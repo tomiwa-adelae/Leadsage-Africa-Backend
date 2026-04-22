@@ -16,6 +16,7 @@ import { WalletModule } from './wallet/wallet.module';
 import { SavingsModule } from './savings/savings.module';
 import { UploadModule } from './upload/upload.module';
 import { EncryptionModule } from './encryption/encryption.module';
+import { BlogModule } from './blog/blog.module';
 
 @Module({
   imports: [
@@ -34,6 +35,7 @@ import { EncryptionModule } from './encryption/encryption.module';
     WebhooksModule,
     TasksModule,
     UploadModule,
+    BlogModule,
   ],
   controllers: [AppController],
   providers: [AppService],

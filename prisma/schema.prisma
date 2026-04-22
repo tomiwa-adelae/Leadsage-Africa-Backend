@@ -85,6 +85,7 @@ model User {
   walletTxs         WalletTransaction[]
   escrowsAsLandlord PaymentEscrow[]     @relation("EscrowLandlord")
   firstKeySavings   FirstKeySavings[]
+  posts             Post[]              @relation("AuthoredPosts")
 }
 
 enum AdminPosition {
@@ -524,7 +525,7 @@ model WalletAccount {
   availableBalance Float @default(0)
   pendingBalance   Float @default(0) // held in escrow
 
-  isActive  Boolean  @default(false) // activated after KYC
+  isActive Boolean @default(false) // activated after KYC
 
   transactionPin    String?
   transactionPinSet Boolean @default(false)
@@ -633,8 +634,8 @@ model FirstKeySavings {
   // Academic context
   schoolName        String @default("covenant_university") // e.g. "covenant_university"
   academicLevel     String // "100" | "200" | "300" | "400" | "500"
-  expectedGradYear  Int    // e.g. 2027
-  expectedGradMonth Int?   // 1-12; required when duration = UNTIL_GRADUATION
+  expectedGradYear  Int // e.g. 2027
+  expectedGradMonth Int? // 1-12; required when duration = UNTIL_GRADUATION
 
   // Plan configuration
   planName           String?
@@ -731,4 +732,22 @@ enum SavingsTxType {
   WITHDRAWAL
   PENALTY
   REFUND
+}
+
+// Blog Posts
+model Post {
+  id          String    @id @default(uuid())
+  title       String
+  slug        String    @unique
+  excerpt     String?   @db.Text
+  body        String    @db.Text
+  coverImage  String?
+  category    String    @default("OTHER")
+  status      String    @default("DRAFT")
+  tags        String[]
+  publishedAt DateTime?
+  authorId    String
+  author      User      @relation("AuthoredPosts", fields: [authorId], references: [id])
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 }

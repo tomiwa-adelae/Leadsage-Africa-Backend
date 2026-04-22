@@ -87,4 +87,22 @@ export class UploadService {
       throw new InternalServerErrorException('Cloudflare R2 upload failed');
     }
   }
+
+  async uploadBlogCover(file: Express.Multer.File): Promise<string> {
+    try {
+      const key = `blog-covers/${randomUUID()}-${file.originalname}`;
+      await this.s3.send(
+        new PutObjectCommand({
+          Bucket: this.bucket,
+          Key: key,
+          Body: file.buffer,
+          ContentType: file.mimetype,
+        }),
+      );
+      return `${this.publicUrl}/${key}`;
+    } catch (err) {
+      console.error('Blog cover upload failed:', err);
+      throw new InternalServerErrorException('Cloudflare R2 upload failed');
+    }
+  }
 }
