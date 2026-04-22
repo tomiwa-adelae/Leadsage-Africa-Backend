@@ -13,6 +13,7 @@ import { PrismaService } from 'src/prisma/prisma.service';
 import { MailService } from 'src/mail/mail.service';
 import { PaystackService } from 'src/paystack/paystack.service';
 import { WalletService } from 'src/wallet/wallet.service';
+import { EncryptionService } from 'src/encryption/encryption.service';
 import { ListingApprovedEmail } from 'emails/listing-approved-email';
 import { ListingRejectedEmail } from 'emails/listing-rejected-email';
 import { RejectListingDto } from './dto/reject-listing.dto';
@@ -47,6 +48,7 @@ export class AdminService {
     private mail: MailService,
     private paystack: PaystackService,
     private wallet: WalletService,
+    private encryption: EncryptionService,
   ) {}
 
   // ── Dashboard Stats ────────────────────────────────────────────────────────
@@ -909,6 +911,10 @@ export class AdminService {
     if (!app) throw new NotFoundException('Application not found');
     if (!app.nin) throw new BadRequestException('No NIN provided in this application');
 
+    const plainNin = this.encryption.isEncrypted(app.nin)
+      ? this.encryption.decrypt(app.nin)
+      : app.nin;
+
     const apiKey = process.env.PREMBLY_API_KEY;
     if (!apiKey) throw new InternalServerErrorException('NIN verification not configured');
 
@@ -917,7 +923,7 @@ export class AdminService {
       res = await fetch('https://api.prembly.com/identitypass/verification/nin', {
         method: 'POST',
         headers: { 'x-api-key': apiKey, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ number_nin: app.nin }),
+        body: JSON.stringify({ number_nin: plainNin }),
       });
     } catch {
       throw new InternalServerErrorException('Could not reach NIN verification service');

@@ -8,6 +8,7 @@ import {
 import * as bcrypt from 'bcryptjs';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { AnchorService } from 'src/anchor/anchor.service';
+import { EncryptionService } from 'src/encryption/encryption.service';
 import { randomUUID } from 'crypto';
 
 const COMMISSION_RATE = 0.05; // 5%
@@ -21,6 +22,7 @@ export class WalletService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly anchor: AnchorService,
+    private readonly encryption: EncryptionService,
   ) {}
 
   // ── Wallet provisioning ────────────────────────────────────────────────────
@@ -61,10 +63,10 @@ export class WalletService {
     });
     if (!user) throw new NotFoundException('User not found');
 
-    // Mark as submitted immediately
+    // Mark as submitted immediately — store BVN encrypted
     await this.prisma.walletAccount.update({
       where: { userId },
-      data: { bvn, dateOfBirth, gender, kycStatus: 'SUBMITTED' },
+      data: { bvn: this.encryption.encrypt(bvn), dateOfBirth, gender, kycStatus: 'SUBMITTED' },
     });
 
     try {
@@ -76,7 +78,7 @@ export class WalletService {
         phoneNumber: user.phoneNumber ?? '08000000000',
       });
 
-      // 2. Submit BVN for Tier 1
+      // 2. Submit BVN for Tier 1 — use the original plain-text bvn from the request
       await this.anchor.verifyBvn(anchorCustomerId, { bvn, dateOfBirth, gender });
 
       // 3. Create deposit account (returns id + account number details)

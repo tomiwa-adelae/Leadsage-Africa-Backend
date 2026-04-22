@@ -15,9 +15,11 @@ import { AnchorModule } from './anchor/anchor.module';
 import { WalletModule } from './wallet/wallet.module';
 import { SavingsModule } from './savings/savings.module';
 import { UploadModule } from './upload/upload.module';
+import { EncryptionModule } from './encryption/encryption.module';
 
 @Module({
   imports: [
+    EncryptionModule,
     PrismaModule,
     MailModule,
     PaystackModule,

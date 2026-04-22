@@ -8,6 +8,7 @@ import { differenceInCalendarDays } from 'date-fns';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { PaystackService } from 'src/paystack/paystack.service';
 import { WalletService } from 'src/wallet/wallet.service';
+import { EncryptionService } from 'src/encryption/encryption.service';
 import { CreateApplicationDto } from './dto/create-application.dto';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { CreateTourRequestDto } from './dto/create-tour-request.dto';
@@ -20,6 +21,7 @@ export class UserService {
     private readonly prisma: PrismaService,
     private readonly paystack: PaystackService,
     private readonly wallet: WalletService,
+    private readonly encryption: EncryptionService,
   ) {}
 
   // ── Dashboard Stats ────────────────────────────────────────────────────────
@@ -822,7 +824,7 @@ export class UserService {
       moveInDate: dto.moveInDate ? new Date(dto.moveInDate) : undefined,
       tenancyMonths: dto.tenancyMonths,
       reasonForMoving: dto.reasonForMoving,
-      nin: dto.nin,
+      nin: dto.nin ? this.encryption.encrypt(dto.nin) : undefined,
       employmentStatus: dto.employmentStatus,
       employer: dto.employer,
       jobTitle: dto.jobTitle,
