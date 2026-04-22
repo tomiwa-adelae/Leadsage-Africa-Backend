@@ -9,12 +9,16 @@
 
 import 'dotenv/config';
 import { PrismaClient } from '@prisma/client';
+import { PrismaNeon } from '@prisma/adapter-neon';
+import { neonConfig } from '@neondatabase/serverless';
+import ws from 'ws';
 import {
   createCipheriv,
-  createDecipheriv,
   randomBytes,
   scryptSync,
 } from 'crypto';
+
+neonConfig.webSocketConstructor = ws;
 
 const ALGORITHM = 'aes-256-gcm';
 const IV_LEN = 12;
@@ -49,7 +53,8 @@ async function main() {
   const key = buildKey();
   const dbUrl = process.env.DATABASE_URL;
   if (!dbUrl) throw new Error('DATABASE_URL is not set');
-  const prisma = new PrismaClient({ datasourceUrl: dbUrl });
+  const adapter = new PrismaNeon({ connectionString: dbUrl });
+  const prisma = new PrismaClient({ adapter });
 
   // ── BVN on WalletAccount ──────────────────────────────────────────────────
   const wallets = await prisma.walletAccount.findMany({
