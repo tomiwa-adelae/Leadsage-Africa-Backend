@@ -63,7 +63,11 @@ export class UploadService {
         data: { image: fileUrl },
       });
 
-      return { message: 'Profile picture uploaded successfully!', imageUrl: fileUrl, user: updatedUser };
+      return {
+        message: 'Profile picture uploaded successfully!',
+        imageUrl: fileUrl,
+        user: updatedUser,
+      };
     } catch (err) {
       if (err instanceof NotFoundException) throw err;
       throw new InternalServerErrorException('Cloudflare R2 upload failed');
@@ -104,5 +108,18 @@ export class UploadService {
       console.error('Blog cover upload failed:', err);
       throw new InternalServerErrorException('Cloudflare R2 upload failed');
     }
+  }
+
+  async uploadEditorImage(file: any): Promise<{ url: string }> {
+    const key = `editor-images/${randomUUID()}-${file.originalname}`;
+    await this.s3.send(
+      new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+        Body: file.buffer,
+        ContentType: file.mimetype,
+      }),
+    );
+    return { url: `${this.publicUrl}/${key}` };
   }
 }
