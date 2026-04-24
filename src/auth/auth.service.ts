@@ -746,6 +746,21 @@ export class AuthService {
   }
 
   // ── Google OAuth ──────────────────────────────────────────────────────────
+
+  getGoogleAuthUrl(redirectUri: string, state: string): string {
+    const client = new OAuth2Client(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      redirectUri,
+    );
+    return client.generateAuthUrl({
+      access_type: 'offline',
+      scope: ['openid', 'email', 'profile'],
+      state,
+      prompt: 'select_account',
+    });
+  }
+
   // Exchanges an authorization code for a Google user profile, then upserts
   // the user: link by email if an account already exists, otherwise create new.
   async googleExchange(code: string, redirectUri: string) {

@@ -7,6 +7,7 @@ import {
   HttpStatus,
   Patch,
   Post,
+  Query,
   Req,
   Request,
   Res,
@@ -227,6 +228,50 @@ export class AuthController {
       dto.newPassword,
       dto.confirmPassword,
     );
+  }
+
+  private get googleRedirectUri(): string {
+    const base =
+      process.env.BACKEND_URL ?? `http://localhost:${process.env.PORT ?? 8000}`;
+    return `${base}/api/auth/google/callback`;
+  }
+
+  @Get('google')
+  googleOAuthInit(
+    @Query('callbackURL') callbackURL: string,
+    @Res() res: Response,
+  ) {
+    const state = callbackURL ?? '/';
+    const url = this.authService.getGoogleAuthUrl(this.googleRedirectUri, state);
+    return res.redirect(url);
+  }
+
+  @Get('google/callback')
+  async googleOAuthCallback(
+    @Query('code') code: string,
+    @Query('state') state: string,
+    @Query('error') oauthError: string,
+    @Res() res: Response,
+  ) {
+    const frontendUrl = process.env.FRONTEND_URL ?? 'http://localhost:3000';
+
+    if (oauthError || !code) {
+      return res.redirect(`${frontendUrl}/login?error=oauth_failed`);
+    }
+
+    try {
+      const { access_token, refresh_token } =
+        await this.authService.googleExchange(code, this.googleRedirectUri);
+
+      const next = state ?? '/';
+      const dest = new URL(`${frontendUrl}/api/auth/oauth/callback`);
+      dest.searchParams.set('at', access_token);
+      dest.searchParams.set('rt', refresh_token);
+      dest.searchParams.set('next', next);
+      return res.redirect(dest.toString());
+    } catch {
+      return res.redirect(`${frontendUrl}/login?error=oauth_failed`);
+    }
   }
 
   @Post('google/exchange')

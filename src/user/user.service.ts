@@ -27,58 +27,64 @@ export class UserService {
   // ── Dashboard Stats ────────────────────────────────────────────────────────
 
   async getStats(userId: string) {
-    const [saved, applications, bookings, unreadNotifications, savingsPlans, wallet] =
-      await Promise.all([
-        this.prisma.savedListing.count({ where: { userId } }),
-        this.prisma.application.count({ where: { userId } }),
-        this.prisma.booking.count({ where: { userId } }),
-        this.prisma.notification.count({ where: { userId, isRead: false } }),
-        this.prisma.firstKeySavings.findMany({
-          where: { userId, status: { in: ['ACTIVE', 'PAUSED', 'MATURED'] } },
-          select: { id: true, planName: true, totalDeposited: true, interestEarned: true, status: true },
-        }),
-        this.prisma.walletAccount.findUnique({ where: { userId }, select: { availableBalance: true } }),
-      ]);
+    const listingSelect = {
+      id: true, slug: true, title: true,
+      area: true, state: true, photos: true,
+      pricePerYear: true, pricePerNight: true,
+      bedrooms: true, bathrooms: true,
+      listingType: true, propertyCategory: true,
+      minimumNights: true,
+    };
 
-    const recentApplications = await this.prisma.application.findMany({
-      where: { userId },
-      orderBy: { createdAt: 'desc' },
-      take: 5,
-      include: {
-        listing: {
-          select: {
-            id: true,
-            slug: true,
-            title: true,
-            area: true,
-            state: true,
-            photos: true,
-            pricePerYear: true,
-            pricePerNight: true,
-            listingType: true,
-          },
-        },
-      },
-    });
-
-    const recentBookings = await this.prisma.booking.findMany({
-      where: { userId },
-      orderBy: { createdAt: 'desc' },
-      take: 5,
-      include: {
-        listing: {
-          select: {
-            id: true,
-            slug: true,
-            title: true,
-            area: true,
-            state: true,
-            photos: true,
-            pricePerNight: true,
-          },
-        },
-      },
-    });
+    const [
+      saved, applications, bookings, unreadNotifications,
+      savingsPlans, wallet,
+      recentApplications, recentBookings,
+      upcomingTours, featuredListings, featuredShortlets, agreementsCount,
+    ] = await Promise.all([
+      this.prisma.savedListing.count({ where: { userId } }),
+      this.prisma.application.count({ where: { userId } }),
+      this.prisma.booking.count({ where: { userId } }),
+      this.prisma.notification.count({ where: { userId, isRead: false } }),
+      this.prisma.firstKeySavings.findMany({
+        where: { userId, status: { in: ['ACTIVE', 'PAUSED', 'MATURED'] } },
+        select: { id: true, planName: true, totalDeposited: true, interestEarned: true, status: true },
+      }),
+      this.prisma.walletAccount.findUnique({ where: { userId }, select: { availableBalance: true } }),
+      this.prisma.application.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+        include: { listing: { select: listingSelect } },
+      }),
+      this.prisma.booking.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+        include: { listing: { select: listingSelect } },
+      }),
+      this.prisma.tourRequest.findMany({
+        where: { userId, status: { in: ['PENDING', 'SCHEDULED'] } },
+        orderBy: { scheduledAt: 'asc' },
+        take: 4,
+        include: { listing: { select: { id: true, slug: true, title: true, area: true, state: true, photos: true } } },
+      }),
+      this.prisma.listing.findMany({
+        where: { status: 'PUBLISHED', listingType: 'LONG_TERM', isDeleted: false },
+        orderBy: { createdAt: 'desc' },
+        take: 8,
+        select: listingSelect,
+      }),
+      this.prisma.listing.findMany({
+        where: { status: 'PUBLISHED', listingType: 'SHORTLET', isDeleted: false },
+        orderBy: { createdAt: 'desc' },
+        take: 8,
+        select: listingSelect,
+      }),
+      this.prisma.rentalAgreement.count({
+        where: { tenantId: userId, status: 'FULLY_SIGNED' },
+      }),
+    ]);
 
     const savingsTotalBalance = savingsPlans.reduce(
       (sum, p) => sum + p.totalDeposited + p.interestEarned, 0,
@@ -92,6 +98,7 @@ export class UserService {
       applications,
       bookings,
       unreadNotifications,
+      agreements: agreementsCount,
       walletBalance: wallet?.availableBalance ?? 0,
       savings: {
         activePlans: savingsPlans.length,
@@ -101,6 +108,9 @@ export class UserService {
       },
       recentApplications,
       recentBookings,
+      upcomingTours,
+      featuredListings,
+      featuredShortlets,
     };
   }
 
