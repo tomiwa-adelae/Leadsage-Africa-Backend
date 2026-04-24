@@ -245,9 +245,14 @@ export class AnchorService {
     accountName: string;
   }) {
     const data = await this.request<any>('POST', '/api/v1/counterparties', {
-      bankCode: params.bankCode,
-      accountNumber: params.accountNumber,
-      accountName: params.accountName,
+      data: {
+        type: 'Counterparty',
+        attributes: {
+          bankCode: params.bankCode,
+          accountNumber: params.accountNumber,
+          accountName: params.accountName,
+        },
+      },
     });
     return data?.data?.id as string;
   }
