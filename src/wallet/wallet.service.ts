@@ -94,27 +94,20 @@ export class WalletService {
 
       if (!alreadyVerified) {
         // Submit BVN — Anchor processes this asynchronously in live
-        const res = await this.anchor.verifyBvn(anchorCustomerId, {
-          bvn,
-          dateOfBirth,
-          gender,
+        await this.anchor.verifyBvn(anchorCustomerId, { bvn, dateOfBirth, gender });
+
+        // Save customerId immediately so webhook / sync can pick up from here
+        await this.prisma.walletAccount.update({
+          where: { userId },
+          data: { anchorCustomerId, kycStatus: 'SUBMITTED' },
         });
 
-        console.log(bvn, dateOfBirth, gender);
-
-        console.log('BVN submission response:', res);
-
-        // Wait for Anchor to confirm the KYC tier (up to ~60s)
-        const kycConfirmed =
-          await this.anchor.pollCustomerKycVerified(anchorCustomerId);
+        // Poll briefly in case Anchor confirms fast (sandbox / lucky timing)
+        const kycConfirmed = await this.anchor.pollCustomerKycVerified(anchorCustomerId);
         if (!kycConfirmed) {
-          await this.prisma.walletAccount.update({
-            where: { userId },
-            data: { anchorCustomerId, kycStatus: 'SUBMITTED' },
-          });
-          throw new BadRequestException(
-            'BVN verification is processing — please wait a moment and try again.',
-          );
+          // BVN accepted — Anchor fires customer.identification.approved webhook
+          // which auto-activates the wallet. Frontend auto-sync handles the rest.
+          return { kycStatus: 'SUBMITTED', message: 'BVN verification submitted. Your wallet will activate automatically.' };
         }
       }
 
@@ -141,11 +134,9 @@ export class WalletService {
 
       return this.prisma.walletAccount.findUnique({ where: { userId } });
     } catch (err: any) {
-      // Don't mark as FAILED if it's just pending — user should be able to retry
-      const isPending = err?.message?.includes('processing');
       await this.prisma.walletAccount.update({
         where: { userId },
-        data: { kycStatus: isPending ? 'SUBMITTED' : 'FAILED' },
+        data: { kycStatus: 'FAILED' },
       });
       throw err;
     }

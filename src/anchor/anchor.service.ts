@@ -127,6 +127,14 @@ export class AnchorService {
       gender: 'Male' | 'Female';
     },
   ) {
+    console.log(
+      'BVN',
+      params.bvn,
+      'DOB',
+      params.dateOfBirth,
+      'Gender',
+      params.gender,
+    );
     return this.request(
       'POST',
       `/api/v1/customers/${customerId}/verification/individual`,
@@ -189,21 +197,33 @@ export class AnchorService {
    * e.g. "TIER_0", "TIER_1", "TIER_2", "TIER_3", or "" if unknown.
    * Also checks identityVerification.status for APIs that use that field.
    */
-  async getCustomerTier(customerId: string): Promise<{ tier: string; verified: boolean }> {
+  async getCustomerTier(
+    customerId: string,
+  ): Promise<{ tier: string; verified: boolean }> {
     try {
       const data = await this.getCustomer(customerId);
       const attrs = data?.data?.attributes ?? {};
-      const tier: string = attrs?.tier ?? '';
+
+      // Log raw attrs so we can see exactly what Anchor returns
+      this.logger.log(`Anchor customer attrs: ${JSON.stringify(attrs)}`);
+
+      // Live Anchor: KYC data lives under attrs.verification.level / .status
+      const tier: string = attrs?.verification?.level ?? attrs?.tier ?? '';
       const verificationStatus: string =
+        attrs?.verification?.status ??
         attrs?.identityVerification?.status ??
         attrs?.verificationStatus ??
         '';
 
+      const tierNorm = tier.replace(/[\s_]/g, '').toUpperCase(); // "TIER2"
+      const statusNorm = verificationStatus.toUpperCase();
+
       const verified =
-        tier === 'TIER_2' ||
-        tier === 'TIER_3' ||
-        verificationStatus === 'VERIFIED' ||
-        verificationStatus === 'SUCCESSFUL';
+        tierNorm === 'TIER2' ||
+        tierNorm === 'TIER3' ||
+        statusNorm === 'APPROVED' ||
+        statusNorm === 'VERIFIED' ||
+        statusNorm === 'SUCCESSFUL';
 
       return { tier, verified };
     } catch {
@@ -226,27 +246,27 @@ export class AnchorService {
         const data = await this.getCustomer(customerId);
         const attrs = data?.data?.attributes ?? {};
 
-        // Anchor may use different field names across versions
-        const tier: string = attrs?.tier ?? '';
+        const tier: string = attrs?.verification?.level ?? attrs?.tier ?? '';
         const verificationStatus: string =
+          attrs?.verification?.status ??
           attrs?.identityVerification?.status ??
           attrs?.verificationStatus ??
           '';
 
+        const tierNorm = tier.replace(/[\s_]/g, '').toUpperCase();
+        const statusNorm = verificationStatus.toUpperCase();
+
         if (
-          tier === 'TIER_2' ||
-          tier === 'TIER_3' ||
-          verificationStatus === 'VERIFIED' ||
-          verificationStatus === 'SUCCESSFUL'
+          tierNorm === 'TIER2' ||
+          tierNorm === 'TIER3' ||
+          statusNorm === 'APPROVED' ||
+          statusNorm === 'VERIFIED' ||
+          statusNorm === 'SUCCESSFUL'
         ) {
           return true;
         }
 
-        // If Anchor explicitly failed the verification, stop polling
-        if (
-          verificationStatus === 'FAILED' ||
-          verificationStatus === 'REJECTED'
-        ) {
+        if (statusNorm === 'FAILED' || statusNorm === 'REJECTED') {
           return false;
         }
       } catch {
