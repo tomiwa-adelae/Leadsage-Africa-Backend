@@ -94,7 +94,11 @@ export class WalletService {
 
       if (!alreadyVerified) {
         // Submit BVN — Anchor processes this asynchronously in live
-        await this.anchor.verifyBvn(anchorCustomerId, { bvn, dateOfBirth, gender });
+        await this.anchor.verifyBvn(anchorCustomerId, {
+          bvn,
+          dateOfBirth,
+          gender,
+        });
 
         // Save customerId immediately so webhook / sync can pick up from here
         await this.prisma.walletAccount.update({
@@ -103,11 +107,16 @@ export class WalletService {
         });
 
         // Poll briefly in case Anchor confirms fast (sandbox / lucky timing)
-        const kycConfirmed = await this.anchor.pollCustomerKycVerified(anchorCustomerId);
+        const kycConfirmed =
+          await this.anchor.pollCustomerKycVerified(anchorCustomerId);
         if (!kycConfirmed) {
           // BVN accepted — Anchor fires customer.identification.approved webhook
           // which auto-activates the wallet. Frontend auto-sync handles the rest.
-          return { kycStatus: 'SUBMITTED', message: 'BVN verification submitted. Your wallet will activate automatically.' };
+          return {
+            kycStatus: 'SUBMITTED',
+            message:
+              'BVN verification submitted. Your wallet will activate automatically.',
+          };
         }
       }
 
@@ -168,6 +177,8 @@ export class WalletService {
     const { tier, verified } = await this.anchor.getCustomerTier(
       wallet.anchorCustomerId,
     );
+
+    console.log(tier, verified);
 
     if (!verified) {
       return {
