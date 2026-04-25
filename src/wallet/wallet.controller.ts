@@ -56,6 +56,12 @@ export class WalletController {
     );
   }
 
+  @Post('kyc/sync')
+  @HttpCode(HttpStatus.OK)
+  syncKyc(@CurrentUser() user: { id: string }) {
+    return this.walletService.syncKyc(user.id);
+  }
+
   // ── Transaction PIN ────────────────────────────────────────────────────────
 
   @Post('set-pin')

@@ -13,7 +13,7 @@ import { randomUUID } from 'crypto';
 
 const COMMISSION_RATE = 0.05; // 5%
 const SHORTLET_HOLD_HOURS = 24; // release 24h after check-in
-const RENTAL_HOLD_HOURS = 24;   // release 24h after payment
+const RENTAL_HOLD_HOURS = 24; // release 24h after payment
 
 @Injectable()
 export class WalletService {
@@ -32,7 +32,9 @@ export class WalletService {
    * Anchor account is created only after KYC (BVN submission).
    */
   async provisionWallet(userId: string): Promise<void> {
-    const existing = await this.prisma.walletAccount.findUnique({ where: { userId } });
+    const existing = await this.prisma.walletAccount.findUnique({
+      where: { userId },
+    });
     if (existing) return;
     await this.prisma.walletAccount.create({ data: { userId } });
   }
@@ -47,8 +49,11 @@ export class WalletService {
     dateOfBirth: string,
     gender: 'Male' | 'Female',
   ) {
-    let wallet = await this.prisma.walletAccount.findUnique({ where: { userId } });
-    if (!wallet) wallet = await this.prisma.walletAccount.create({ data: { userId } });
+    let wallet = await this.prisma.walletAccount.findUnique({
+      where: { userId },
+    });
+    if (!wallet)
+      wallet = await this.prisma.walletAccount.create({ data: { userId } });
     if (wallet.kycStatus === 'VERIFIED')
       throw new BadRequestException('KYC already verified');
 
@@ -66,7 +71,12 @@ export class WalletService {
     // Mark as submitted immediately — store BVN encrypted
     await this.prisma.walletAccount.update({
       where: { userId },
-      data: { bvn: this.encryption.encrypt(bvn), dateOfBirth, gender, kycStatus: 'SUBMITTED' },
+      data: {
+        bvn: this.encryption.encrypt(bvn),
+        dateOfBirth,
+        gender,
+        kycStatus: 'SUBMITTED',
+      },
     });
 
     try {
@@ -78,10 +88,37 @@ export class WalletService {
         phoneNumber: user.phoneNumber ?? '08000000000',
       });
 
-      // 2. Submit BVN for Tier 1 — use the original plain-text bvn from the request
-      await this.anchor.verifyBvn(anchorCustomerId, { bvn, dateOfBirth, gender });
+      // 2. Check if Anchor already has this customer at TIER_2 (e.g. prior attempt succeeded)
+      const { verified: alreadyVerified } =
+        await this.anchor.getCustomerTier(anchorCustomerId);
 
-      // 3. Create deposit account (returns id + account number details)
+      if (!alreadyVerified) {
+        // Submit BVN — Anchor processes this asynchronously in live
+        const res = await this.anchor.verifyBvn(anchorCustomerId, {
+          bvn,
+          dateOfBirth,
+          gender,
+        });
+
+        console.log(bvn, dateOfBirth, gender);
+
+        console.log('BVN submission response:', res);
+
+        // Wait for Anchor to confirm the KYC tier (up to ~60s)
+        const kycConfirmed =
+          await this.anchor.pollCustomerKycVerified(anchorCustomerId);
+        if (!kycConfirmed) {
+          await this.prisma.walletAccount.update({
+            where: { userId },
+            data: { anchorCustomerId, kycStatus: 'SUBMITTED' },
+          });
+          throw new BadRequestException(
+            'BVN verification is processing — please wait a moment and try again.',
+          );
+        }
+      }
+
+      // 3. Create deposit account
       const account = await this.anchor.createDepositAccount(anchorCustomerId);
 
       // 4. Poll for virtual NUBAN (assigned async by Anchor — usually a few seconds)
@@ -103,20 +140,113 @@ export class WalletService {
       });
 
       return this.prisma.walletAccount.findUnique({ where: { userId } });
-    } catch (err) {
+    } catch (err: any) {
+      // Don't mark as FAILED if it's just pending — user should be able to retry
+      const isPending = err?.message?.includes('processing');
       await this.prisma.walletAccount.update({
         where: { userId },
-        data: { kycStatus: 'FAILED' },
+        data: { kycStatus: isPending ? 'SUBMITTED' : 'FAILED' },
       });
       throw err;
     }
   }
 
+  /**
+   * For users stuck in FAILED/SUBMITTED: re-checks Anchor for their current KYC
+   * tier and, if verified, creates the deposit account and activates the wallet.
+   * Safe to call repeatedly — idempotent.
+   */
+  async syncKyc(userId: string) {
+    const wallet = await this.prisma.walletAccount.findUnique({
+      where: { userId },
+    });
+    if (!wallet) throw new NotFoundException('Wallet not found');
+    if (wallet.kycStatus === 'VERIFIED')
+      return { status: 'VERIFIED', message: 'Wallet already active' };
+
+    // If we never got an Anchor customer ID yet, user must start fresh via /kyc
+    if (!wallet.anchorCustomerId) {
+      return {
+        status: wallet.kycStatus,
+        message: 'No Anchor customer on record — please submit BVN to start.',
+      };
+    }
+
+    console.log('syncing the bvn');
+
+    const { tier, verified } = await this.anchor.getCustomerTier(
+      wallet.anchorCustomerId,
+    );
+
+    if (!verified) {
+      return {
+        status: 'PENDING',
+        tier,
+        message:
+          'BVN verification not yet confirmed by Anchor. Please try again in a few minutes.',
+      };
+    }
+
+    // Tier is good — check if a deposit account already exists for this customer
+    let anchorAccountId = wallet.anchorAccountId ?? undefined;
+    let nuban = wallet.virtualAccountNo
+      ? {
+          accountNumber: wallet.virtualAccountNo,
+          accountName: wallet.virtualAccountName,
+          bankName: wallet.virtualBankName,
+        }
+      : null;
+
+    if (!anchorAccountId) {
+      const account = await this.anchor.createDepositAccount(
+        wallet.anchorCustomerId,
+      );
+      anchorAccountId = account.id;
+    }
+
+    if (!nuban?.accountNumber) {
+      nuban = await this.anchor.pollVirtualNubans(anchorAccountId);
+    }
+
+    await this.prisma.walletAccount.update({
+      where: { userId },
+      data: {
+        anchorAccountId,
+        virtualAccountNo: nuban?.accountNumber ?? null,
+        virtualAccountName: nuban?.accountName ?? null,
+        virtualBankName: nuban?.bankName ?? null,
+        kycStatus: 'VERIFIED',
+        isActive: true,
+      },
+    });
+
+    return {
+      status: 'VERIFIED',
+      message: 'Wallet activated successfully',
+      tier,
+    };
+  }
+
+  /**
+   * Called from the Anchor webhook when customer.identification.approved fires.
+   * Looks up the wallet by anchorCustomerId and activates it.
+   */
+  async syncKycByAnchorCustomerId(anchorCustomerId: string): Promise<void> {
+    const wallet = await this.prisma.walletAccount.findFirst({
+      where: { anchorCustomerId },
+    });
+    if (!wallet || wallet.kycStatus === 'VERIFIED') return;
+    await this.syncKyc(wallet.userId);
+  }
+
   // ── Balances & transactions ────────────────────────────────────────────────
 
   async getWallet(userId: string) {
-    const wallet = await this.prisma.walletAccount.findUnique({ where: { userId } });
-    const record = wallet ?? await this.prisma.walletAccount.create({ data: { userId } });
+    const wallet = await this.prisma.walletAccount.findUnique({
+      where: { userId },
+    });
+    const record =
+      wallet ?? (await this.prisma.walletAccount.create({ data: { userId } }));
     const { transactionPin: _, ...safe } = record;
     return safe;
   }
@@ -124,7 +254,9 @@ export class WalletService {
   // ── Transaction PIN ────────────────────────────────────────────────────────
 
   private async checkPin(userId: string, pin: string) {
-    const wallet = await this.prisma.walletAccount.findUnique({ where: { userId } });
+    const wallet = await this.prisma.walletAccount.findUnique({
+      where: { userId },
+    });
     if (!wallet) throw new NotFoundException('Wallet not found');
     if (!wallet.transactionPinSet || !wallet.transactionPin)
       throw new BadRequestException('Transaction PIN not set');
@@ -133,15 +265,18 @@ export class WalletService {
   }
 
   async setTransactionPin(userId: string, pin: string, confirmPin: string) {
-    if (pin !== confirmPin)
-      throw new BadRequestException('PINs do not match');
+    if (pin !== confirmPin) throw new BadRequestException('PINs do not match');
     if (!/^\d{4}$/.test(pin))
       throw new BadRequestException('PIN must be exactly 4 digits');
 
-    const wallet = await this.prisma.walletAccount.findUnique({ where: { userId } });
+    const wallet = await this.prisma.walletAccount.findUnique({
+      where: { userId },
+    });
     if (!wallet) throw new NotFoundException('Wallet not found');
     if (wallet.transactionPinSet)
-      throw new BadRequestException('Transaction PIN already set. Use change-pin to update it.');
+      throw new BadRequestException(
+        'Transaction PIN already set. Use change-pin to update it.',
+      );
 
     const hashed = await bcrypt.hash(pin, 10);
     await this.prisma.walletAccount.update({
@@ -226,7 +361,13 @@ export class WalletService {
       const commission = Math.round(b.totalPrice * COMMISSION_RATE * 100) / 100;
       const releaseAt = new Date(
         (b.paidAt ?? b.createdAt).getTime() +
-          Math.max(SHORTLET_HOLD_HOURS, Math.ceil((new Date(b.checkIn).getTime() - Date.now()) / 3_600_000) + SHORTLET_HOLD_HOURS) * 3_600_000,
+          Math.max(
+            SHORTLET_HOLD_HOURS,
+            Math.ceil(
+              (new Date(b.checkIn).getTime() - Date.now()) / 3_600_000,
+            ) + SHORTLET_HOLD_HOURS,
+          ) *
+            3_600_000,
       );
       return {
         id: `booking-${b.id}`,
@@ -260,7 +401,8 @@ export class WalletService {
     });
 
     return [...escrows, ...syntheticFromBookings, ...syntheticFromRentals].sort(
-      (a, b) => new Date(a.releaseAt).getTime() - new Date(b.releaseAt).getTime(),
+      (a, b) =>
+        new Date(a.releaseAt).getTime() - new Date(b.releaseAt).getTime(),
     );
   }
 
@@ -286,7 +428,9 @@ export class WalletService {
       reference?: string;
     },
   ) {
-    const wallet = await this.prisma.walletAccount.findUnique({ where: { userId } });
+    const wallet = await this.prisma.walletAccount.findUnique({
+      where: { userId },
+    });
     if (!wallet) throw new NotFoundException('Wallet not found');
 
     const newBalance = wallet.availableBalance + amountNGN;
@@ -325,7 +469,9 @@ export class WalletService {
       reference?: string;
     },
   ) {
-    const wallet = await this.prisma.walletAccount.findUnique({ where: { userId } });
+    const wallet = await this.prisma.walletAccount.findUnique({
+      where: { userId },
+    });
     if (!wallet) throw new NotFoundException('Wallet not found');
     if (wallet.availableBalance < amountNGN)
       throw new BadRequestException('Insufficient wallet balance');
@@ -371,10 +517,12 @@ export class WalletService {
     paystackRef?: string;
     releaseHoursFromNow?: number;
   }): Promise<string> {
-    const commission = Math.round(params.amountNGN * COMMISSION_RATE * 100) / 100;
+    const commission =
+      Math.round(params.amountNGN * COMMISSION_RATE * 100) / 100;
     const netAmount = params.amountNGN - commission;
     const releaseAt = new Date(
-      Date.now() + (params.releaseHoursFromNow ?? RENTAL_HOLD_HOURS) * 60 * 60 * 1000,
+      Date.now() +
+        (params.releaseHoursFromNow ?? RENTAL_HOLD_HOURS) * 60 * 60 * 1000,
     );
 
     const escrow = await this.prisma.paymentEscrow.create({
@@ -410,10 +558,12 @@ export class WalletService {
     rentalPaymentId?: string;
     releaseHoursFromNow?: number;
   }): Promise<string> {
-    const commission = Math.round(params.amountNGN * COMMISSION_RATE * 100) / 100;
+    const commission =
+      Math.round(params.amountNGN * COMMISSION_RATE * 100) / 100;
     const netAmount = params.amountNGN - commission;
     const releaseAt = new Date(
-      Date.now() + (params.releaseHoursFromNow ?? RENTAL_HOLD_HOURS) * 60 * 60 * 1000,
+      Date.now() +
+        (params.releaseHoursFromNow ?? RENTAL_HOLD_HOURS) * 60 * 60 * 1000,
     );
 
     // Debit tenant's wallet
@@ -469,7 +619,9 @@ export class WalletService {
       { type: 'ESCROW_RELEASE', escrowId },
     );
 
-    this.logger.log(`Escrow ${escrowId} released — ₦${escrow.netAmount} to landlord ${escrow.landlordId}`);
+    this.logger.log(
+      `Escrow ${escrowId} released — ₦${escrow.netAmount} to landlord ${escrow.landlordId}`,
+    );
   }
 
   /**
@@ -500,7 +652,11 @@ export class WalletService {
 
   // ── Wallet-pay for rent ────────────────────────────────────────────────────
 
-  async payRentFromWallet(userId: string, rentalPaymentId: string, pin: string) {
+  async payRentFromWallet(
+    userId: string,
+    rentalPaymentId: string,
+    pin: string,
+  ) {
     await this.checkPin(userId, pin);
     const payment = await this.prisma.rentalPayment.findFirst({
       where: { id: rentalPaymentId, userId },
@@ -509,7 +665,8 @@ export class WalletService {
       },
     });
     if (!payment) throw new NotFoundException('Payment not found');
-    if (payment.status === 'PAID') throw new BadRequestException('Already paid');
+    if (payment.status === 'PAID')
+      throw new BadRequestException('Already paid');
 
     const escrowId = await this.createEscrowFromWallet({
       payerId: userId,
@@ -525,7 +682,10 @@ export class WalletService {
       data: { status: 'PAID', paidAt: new Date() },
     });
 
-    return { escrowId, message: 'Payment held — will be released to landlord within 24 hours' };
+    return {
+      escrowId,
+      message: 'Payment held — will be released to landlord within 24 hours',
+    };
   }
 
   // ── Wallet-pay for shortlet booking ───────────────────────────────────────
@@ -535,11 +695,14 @@ export class WalletService {
     const booking = await this.prisma.booking.findFirst({
       where: { id: bookingId, userId },
       include: {
-        listing: { select: { title: true, landlordId: true, instantBook: true } },
+        listing: {
+          select: { title: true, landlordId: true, instantBook: true },
+        },
       },
     });
     if (!booking) throw new NotFoundException('Booking not found');
-    if (booking.paymentStatus === 'PAID') throw new BadRequestException('Already paid');
+    if (booking.paymentStatus === 'PAID')
+      throw new BadRequestException('Already paid');
 
     const escrowId = await this.createEscrowFromWallet({
       payerId: userId,
@@ -548,12 +711,12 @@ export class WalletService {
       type: 'SHORTLET_BOOKING',
       bookingId,
       // Release 24h after check-in, not immediately
-      releaseHoursFromNow:
-        Math.max(
-          SHORTLET_HOLD_HOURS,
-          Math.ceil((new Date(booking.checkIn).getTime() - Date.now()) / 3_600_000) +
-            SHORTLET_HOLD_HOURS,
-        ),
+      releaseHoursFromNow: Math.max(
+        SHORTLET_HOLD_HOURS,
+        Math.ceil(
+          (new Date(booking.checkIn).getTime() - Date.now()) / 3_600_000,
+        ) + SHORTLET_HOLD_HOURS,
+      ),
     });
 
     const newStatus = booking.listing.instantBook ? 'CONFIRMED' : 'PENDING';
@@ -582,21 +745,31 @@ export class WalletService {
   ) {
     await this.checkPin(userId, pin);
 
-    const wallet = await this.prisma.walletAccount.findUnique({ where: { userId } });
+    const wallet = await this.prisma.walletAccount.findUnique({
+      where: { userId },
+    });
     if (!wallet) throw new NotFoundException('Wallet not found');
-    if (!wallet.isActive) throw new BadRequestException('Complete KYC before withdrawing');
+    if (!wallet.isActive)
+      throw new BadRequestException('Complete KYC before withdrawing');
     if (wallet.availableBalance < amountNGN)
       throw new BadRequestException('Insufficient balance');
 
     // Debit locally first
-    await this.debitWallet(userId, amountNGN, `Withdrawal to ${bankAccountName}`, {
-      type: 'WITHDRAWAL',
-    });
+    await this.debitWallet(
+      userId,
+      amountNGN,
+      `Withdrawal to ${bankAccountName}`,
+      {
+        type: 'WITHDRAWAL',
+      },
+    );
 
     // Initiate NIP transfer from master Anchor account
     const masterAccountId = process.env.ANCHOR_MASTER_ACCOUNT_ID ?? '';
     if (!masterAccountId) {
-      this.logger.warn('ANCHOR_MASTER_ACCOUNT_ID not set — withdrawal queued without transfer');
+      this.logger.warn(
+        'ANCHOR_MASTER_ACCOUNT_ID not set — withdrawal queued without transfer',
+      );
       return { message: 'Withdrawal queued (master account not configured)' };
     }
 
@@ -619,7 +792,9 @@ export class WalletService {
       reason: `Leadsage withdrawal — ${user?.firstName} ${user?.lastName}`,
     });
 
-    return { message: `₦${amountNGN.toLocaleString()} sent to ${bankAccountName}` };
+    return {
+      message: `₦${amountNGN.toLocaleString()} sent to ${bankAccountName}`,
+    };
   }
 
   // ── Bank account verification ──────────────────────────────────────────────
@@ -631,7 +806,9 @@ export class WalletService {
       if (!name) throw new Error('No account name returned');
       return { accountName: name };
     } catch {
-      throw new BadRequestException('Could not verify account — check number and bank');
+      throw new BadRequestException(
+        'Could not verify account — check number and bank',
+      );
     }
   }
 }

@@ -180,6 +180,86 @@ export class AnchorService {
     };
   }
 
+  async getCustomer(customerId: string): Promise<any> {
+    return this.request<any>('GET', `/api/v1/customers/${customerId}`);
+  }
+
+  /**
+   * Returns the customer's current KYC tier string as-is from Anchor,
+   * e.g. "TIER_0", "TIER_1", "TIER_2", "TIER_3", or "" if unknown.
+   * Also checks identityVerification.status for APIs that use that field.
+   */
+  async getCustomerTier(customerId: string): Promise<{ tier: string; verified: boolean }> {
+    try {
+      const data = await this.getCustomer(customerId);
+      const attrs = data?.data?.attributes ?? {};
+      const tier: string = attrs?.tier ?? '';
+      const verificationStatus: string =
+        attrs?.identityVerification?.status ??
+        attrs?.verificationStatus ??
+        '';
+
+      const verified =
+        tier === 'TIER_2' ||
+        tier === 'TIER_3' ||
+        verificationStatus === 'VERIFIED' ||
+        verificationStatus === 'SUCCESSFUL';
+
+      return { tier, verified };
+    } catch {
+      return { tier: '', verified: false };
+    }
+  }
+
+  /**
+   * Poll until the customer's KYC tier reaches TIER_2 (BVN verified).
+   * Returns true if verified within the timeout, false if still pending.
+   * Live Anchor processes BVN asynchronously — this bridges the gap.
+   */
+  async pollCustomerKycVerified(
+    customerId: string,
+    attempts = 20,
+    delayMs = 3000,
+  ): Promise<boolean> {
+    for (let i = 0; i < attempts; i++) {
+      try {
+        const data = await this.getCustomer(customerId);
+        const attrs = data?.data?.attributes ?? {};
+
+        // Anchor may use different field names across versions
+        const tier: string = attrs?.tier ?? '';
+        const verificationStatus: string =
+          attrs?.identityVerification?.status ??
+          attrs?.verificationStatus ??
+          '';
+
+        if (
+          tier === 'TIER_2' ||
+          tier === 'TIER_3' ||
+          verificationStatus === 'VERIFIED' ||
+          verificationStatus === 'SUCCESSFUL'
+        ) {
+          return true;
+        }
+
+        // If Anchor explicitly failed the verification, stop polling
+        if (
+          verificationStatus === 'FAILED' ||
+          verificationStatus === 'REJECTED'
+        ) {
+          return false;
+        }
+      } catch {
+        // ignore transient fetch errors during polling
+      }
+
+      if (i < attempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+    return false;
+  }
+
   async getAccountNumbers(accountId: string): Promise<any[]> {
     try {
       const res = await this.request<any>(

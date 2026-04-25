@@ -56,35 +56,74 @@ export class WebhooksController {
       return { received: true };
     }
 
-    // Log the full event for debugging during integration
-    const eventType: string = event?.data?.type ?? event?.event ?? event?.type ?? '';
-    this.logger.log(`Anchor event type: "${eventType}" | id: ${event?.data?.id ?? event?.id ?? '-'}`);
+    // Anchor puts the human-readable event string in attributes.eventType,
+    // while data.type is the JSON:API resource type (e.g. "NipInboundTransfer")
+    const eventType: string =
+      event?.data?.attributes?.eventType ??
+      event?.data?.type ??
+      event?.event ??
+      event?.type ??
+      '';
+    this.logger.log(`Anchor event: "${eventType}" | id: ${event?.data?.id ?? event?.id ?? '-'}`);
 
-    // Inbound NIP / RTP / Pay events — money arrived into a virtual account
+    const et = eventType.toLowerCase();
+
+    // ── KYC approved ──────────────────────────────────────────────────────────
+    if (et.includes('identification.approved') || et.includes('identification_approved')) {
+      const customerId: string =
+        event?.data?.relationships?.customer?.data?.id ?? '';
+      if (customerId) {
+        this.wallet.syncKycByAnchorCustomerId(customerId).catch((e) =>
+          this.logger.error(`KYC sync error for customer ${customerId}: ${e}`),
+        );
+      }
+      return { received: true };
+    }
+
+    // ── KYC rejected / error — mark wallet as FAILED ──────────────────────────
+    if (et.includes('identification.rejected') || et.includes('identification.error') ||
+        et.includes('identification_rejected') || et.includes('identification_error')) {
+      const customerId: string =
+        event?.data?.relationships?.customer?.data?.id ?? '';
+      if (customerId) {
+        await this.prisma.walletAccount.updateMany({
+          where: { anchorCustomerId: customerId, kycStatus: { not: 'VERIFIED' } },
+          data: { kycStatus: 'FAILED' },
+        }).catch(() => {});
+      }
+      return { received: true };
+    }
+
+    // ── Virtual NUBAN assigned ─────────────────────────────────────────────────
+    if (et.includes('virtualnuban.created') || et.includes('accountnumber.created') ||
+        et.includes('virtual_nuban') || et.includes('account_number.created')) {
+      await this.handleVirtualNubanCreated(event).catch((e) =>
+        this.logger.error(`NUBAN created handler error: ${e}`),
+      );
+      return { received: true };
+    }
+
+    // ── Inbound NIP / RTP / Pay — money arrived into a virtual account ─────────
+    // Live Anchor uses "nip.incomingTransfer.*"; older/sandbox used "nip.inbound_*"
     const INBOUND_EVENTS = [
+      'nip.incomingtransfer.received',
+      'nip.incomingtransfer.completed',
+      'nip.incomingtransfer.settled',
       'nip.inbound_settled',
       'nip.inbound_completed',
       'nip.inbound_received',
+      'rtp.incomingtransfer.received',
+      'rtp.incomingtransfer.completed',
       'rtp.inbound_settled',
       'rtp.inbound_completed',
-      'rtp.inbound_received',
       'pay.inbound_received',
       'pay.inbound_completed',
-      'pay.inbound_settled',
-      // Anchor v1 style
-      'NipInboundSettled',
-      'NipInboundCompleted',
-      'NipInboundReceived',
       'transaction.successful',
-      'Transaction',
     ];
 
     const isInbound =
-      INBOUND_EVENTS.some((e) => eventType.toLowerCase() === e.toLowerCase()) ||
-      // fallback: any event with a credit/inbound direction
-      ['credit', 'inbound', 'deposit'].some((k) =>
-        eventType.toLowerCase().includes(k),
-      );
+      INBOUND_EVENTS.includes(et) ||
+      ['incomingtransfer', 'inbound', 'deposit'].some((k) => et.includes(k));
 
     if (isInbound) {
       await this.handleAnchorInbound(event).catch((e) =>
@@ -93,6 +132,38 @@ export class WebhooksController {
     }
 
     return { received: true };
+  }
+
+  private async handleVirtualNubanCreated(event: any) {
+    const data = event?.data ?? event;
+    const attrs = data?.attributes ?? {};
+
+    const accountNumber: string = attrs?.accountNumber ?? '';
+    const accountName: string = attrs?.accountName ?? attrs?.name ?? '';
+    const bankName: string = attrs?.bank?.name ?? '';
+
+    // The account this NUBAN belongs to
+    const anchorAccountId: string =
+      data?.relationships?.settlementAccount?.data?.id ??
+      data?.relationships?.account?.data?.id ??
+      attrs?.settlementAccountId ??
+      '';
+
+    if (!anchorAccountId || !accountNumber) return;
+
+    // Update wallet if it matches
+    await this.prisma.walletAccount.updateMany({
+      where: { anchorAccountId, virtualAccountNo: null },
+      data: { virtualAccountNo: accountNumber, virtualAccountName: accountName, virtualBankName: bankName },
+    }).catch(() => {});
+
+    // Update savings plan if it matches
+    await this.prisma.firstKeySavings.updateMany({
+      where: { anchorAccountId, nuban: null },
+      data: { nuban: accountNumber, bankName, accountName },
+    }).catch(() => {});
+
+    this.logger.log(`NUBAN assigned: ${accountNumber} → account ${anchorAccountId}`);
   }
 
   private async handleAnchorInbound(event: any) {
