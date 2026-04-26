@@ -305,7 +305,12 @@ export class AnchorService {
 
   async getAccountBalance(accountId: string): Promise<number> {
     const data = await this.getAccount(accountId);
-    const kobo = data?.data?.attributes?.balance ?? 0;
+    const attrs = data?.data?.attributes ?? {};
+    // Anchor returns balances in kobo; availableBalance is the spendable amount
+    const kobo: number =
+      attrs?.availableBalance ??
+      attrs?.balance ??
+      0;
     return kobo / 100;
   }
 

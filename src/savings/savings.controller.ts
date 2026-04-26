@@ -105,6 +105,15 @@ export class SavingsController {
     return this.savingsService.withdraw(user.id, id);
   }
 
+  @Post(':id/sync')
+  @HttpCode(HttpStatus.OK)
+  syncFromAnchor(
+    @CurrentUser() user: { id: string },
+    @Param('id') id: string,
+  ) {
+    return this.savingsService.syncFromAnchor(user.id, id);
+  }
+
   @Post(':id/provision-account')
   @HttpCode(HttpStatus.OK)
   provisionAccount(

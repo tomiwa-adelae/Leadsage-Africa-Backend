@@ -62,6 +62,30 @@ export class WalletController {
     return this.walletService.syncKyc(user.id);
   }
 
+  @Post('sync')
+  @HttpCode(HttpStatus.OK)
+  syncFromAnchor(@CurrentUser() user: { id: string }) {
+    return this.walletService.syncFromAnchor(user.id);
+  }
+
+  @Post('topup/card')
+  @HttpCode(HttpStatus.OK)
+  initCardTopup(
+    @CurrentUser() user: { id: string },
+    @Body('amount') amount: number,
+  ) {
+    return this.walletService.initializeCardTopup(user.id, amount);
+  }
+
+  @Post('topup/card/verify')
+  @HttpCode(HttpStatus.OK)
+  verifyCardTopup(
+    @CurrentUser() user: { id: string },
+    @Body('reference') reference: string,
+  ) {
+    return this.walletService.verifyCardTopup(user.id, reference);
+  }
+
   // ── Transaction PIN ────────────────────────────────────────────────────────
 
   @Post('set-pin')

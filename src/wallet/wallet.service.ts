@@ -8,6 +8,7 @@ import {
 import * as bcrypt from 'bcryptjs';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { AnchorService } from 'src/anchor/anchor.service';
+import { PaystackService } from 'src/paystack/paystack.service';
 import { EncryptionService } from 'src/encryption/encryption.service';
 import { randomUUID } from 'crypto';
 
@@ -22,6 +23,7 @@ export class WalletService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly anchor: AnchorService,
+    private readonly paystack: PaystackService,
     private readonly encryption: EncryptionService,
   ) {}
 
@@ -239,6 +241,93 @@ export class WalletService {
     });
     if (!wallet || wallet.kycStatus === 'VERIFIED') return;
     await this.syncKyc(wallet.userId);
+  }
+
+  // ── Card top-up (Paystack) ─────────────────────────────────────────────────
+
+  async initializeCardTopup(userId: string, amountNGN: number) {
+    const wallet = await this.prisma.walletAccount.findUnique({ where: { userId } });
+    if (!wallet?.isActive) throw new BadRequestException('Complete wallet KYC before topping up');
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true },
+    });
+    if (!user) throw new NotFoundException('User not found');
+
+    const reference = `wallet-topup-${randomUUID()}`;
+    const result = await this.paystack.initializeTransaction(
+      user.email,
+      amountNGN,
+      { userId, type: 'wallet_topup' },
+      `${process.env.FRONTEND_URL}/wallet?verify=${reference}`,
+      reference,
+    );
+
+    return { paymentUrl: result.authorizationUrl, reference };
+  }
+
+  async verifyCardTopup(userId: string, reference: string) {
+    const result = await this.paystack.verifyTransaction(reference);
+    if (result.status !== 'success') {
+      throw new BadRequestException('Payment not successful');
+    }
+
+    // Idempotency — don't double-credit
+    const existing = await this.prisma.walletTransaction.findUnique({
+      where: { reference },
+    });
+    if (existing) return { success: true, alreadyVerified: true };
+
+    const amountNGN = result.amount / 100;
+    try {
+      await this.creditWallet(userId, amountNGN, 'Card top-up', {
+        type: 'CREDIT',
+        reference,
+      });
+    } catch (e: any) {
+      if (e?.code === 'P2002') return { success: true, alreadyVerified: true };
+      throw e;
+    }
+
+    await this.prisma.notification.create({
+      data: {
+        userId,
+        type: 'GENERAL',
+        title: 'Wallet funded',
+        body: `₦${amountNGN.toLocaleString()} has been added to your Sage Nest wallet via card.`,
+        data: { amount: amountNGN },
+      },
+    });
+
+    return { success: true, amount: amountNGN };
+  }
+
+  // ── Sync balance from Anchor ────────────────────────────────────────────────
+
+  async syncFromAnchor(userId: string) {
+    const wallet = await this.prisma.walletAccount.findUnique({ where: { userId } });
+    if (!wallet) throw new NotFoundException('Wallet not found');
+    if (!wallet.anchorAccountId) {
+      return { synced: false, message: 'Wallet not yet activated.' };
+    }
+
+    const anchorBalance = await this.anchor.getAccountBalance(wallet.anchorAccountId);
+    const localBalance = wallet.availableBalance;
+    const diff = +(anchorBalance - localBalance).toFixed(2);
+
+    if (diff <= 0) {
+      return { synced: false, message: 'Balance already up to date.', anchorBalance, localBalance };
+    }
+
+    const reference = `anchor-sync-wallet-${userId}-${Date.now()}`;
+    await this.creditWallet(userId, diff, 'Bank transfer (synced from Anchor)', {
+      type: 'CREDIT',
+      reference,
+    });
+
+    this.logger.log(`Synced ₦${diff} for wallet userId=${userId} from Anchor`);
+    return { synced: true, credited: diff, anchorBalance, localBalance };
   }
 
   // ── Balances & transactions ────────────────────────────────────────────────

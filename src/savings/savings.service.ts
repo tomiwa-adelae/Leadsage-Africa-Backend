@@ -200,6 +200,41 @@ export class SavingsService {
     return { success: true };
   }
 
+  // ── Sync balance from Anchor ────────────────────────────────────────────────
+
+  async syncFromAnchor(userId: string, planId: string) {
+    const plan = await this.getPlanOrThrow(userId, planId);
+
+    if (!plan.anchorAccountId) {
+      return { synced: false, message: 'No Anchor account linked to this plan yet.' };
+    }
+
+    const anchorBalance = await this.anchor.getAccountBalance(plan.anchorAccountId);
+    const localBalance = plan.totalDeposited + plan.interestEarned;
+    const diff = +(anchorBalance - localBalance).toFixed(2);
+
+    if (diff <= 0) {
+      return { synced: false, message: 'Balance already up to date.', anchorBalance, localBalance };
+    }
+
+    // Record the untracked amount as a bank transfer deposit
+    const reference = `anchor-sync-${plan.id}-${Date.now()}`;
+    await this.recordDeposit(plan, diff, reference, 'Bank transfer (synced from Anchor)');
+
+    await this.prisma.notification.create({
+      data: {
+        userId,
+        type: 'GENERAL',
+        title: 'FirstKey deposit synced',
+        body: `₦${diff.toLocaleString()} bank transfer has been credited to your ${plan.planName ?? 'FirstKey'} savings plan.`,
+        data: { savingsId: planId, amount: diff },
+      },
+    });
+
+    this.logger.log(`Synced ₦${diff} for savings plan ${planId} from Anchor`);
+    return { synced: true, credited: diff, anchorBalance, localBalance };
+  }
+
   // ── Provision Account (retry NUBAN for existing plans) ─────────────────────
 
   async provisionAccount(userId: string, planId: string) {
