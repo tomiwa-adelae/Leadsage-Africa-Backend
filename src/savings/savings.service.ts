@@ -176,7 +176,7 @@ export class SavingsService {
       throw new BadRequestException('Cannot deposit to a closed or matured plan');
     }
 
-    // Debit wallet
+    // Debit wallet (DB ledger)
     const reference = `fks-dep-${randomUUID()}`;
     await this.wallet.debitWallet(
       userId,
@@ -185,8 +185,14 @@ export class SavingsService {
       { type: 'DEBIT', reference },
     );
 
-    // Record deposit + update totals
+    // Record deposit in savings ledger
     await this.recordDeposit(plan, amount, reference, 'Wallet deposit');
+
+    // Mirror the move on Anchor so balances stay in sync and auto-sync
+    // doesn't re-credit the wallet on next page load
+    this.moveOnAnchor(userId, plan, amount, reference).catch((e) =>
+      this.logger.warn(`Anchor book transfer failed (non-blocking): ${e}`),
+    );
 
     this.sendSavingsEmail(
       userId,
@@ -198,6 +204,57 @@ export class SavingsService {
     );
 
     return { success: true };
+  }
+
+  /**
+   * Mirror a wallet-to-savings deposit on Anchor so Anchor balances stay in
+   * sync with our DB ledger. Provisions the savings Anchor account first if
+   * it doesn't exist yet. Non-blocking — called fire-and-forget.
+   */
+  private async moveOnAnchor(
+    userId: string,
+    plan: FirstKeySavings,
+    amountNGN: number,
+    reference: string,
+  ) {
+    // Get wallet's Anchor account
+    const walletAccount = await this.prisma.walletAccount.findUnique({
+      where: { userId },
+      select: { anchorAccountId: true },
+    });
+
+    if (!walletAccount?.anchorAccountId) {
+      this.logger.warn(`No wallet Anchor account for user ${userId} — skipping book transfer`);
+      return;
+    }
+
+    // Ensure savings plan has an Anchor account
+    let savingsAnchorAccountId = plan.anchorAccountId ?? undefined;
+
+    if (!savingsAnchorAccountId) {
+      // Try to provision one on-the-fly
+      try {
+        const updated = await this.provisionAccount(userId, plan.id);
+        savingsAnchorAccountId = (updated as any)?.anchorAccountId ?? undefined;
+      } catch (e) {
+        this.logger.warn(`Could not provision savings Anchor account for plan ${plan.id}: ${e}`);
+      }
+    }
+
+    if (!savingsAnchorAccountId) {
+      this.logger.warn(`Savings plan ${plan.id} has no Anchor account — book transfer skipped`);
+      return;
+    }
+
+    await this.anchor.internalTransfer({
+      fromAccountId: walletAccount.anchorAccountId,
+      toAccountId: savingsAnchorAccountId,
+      amountNaira: amountNGN,
+      reference: `anchor-${reference}`,
+      reason: `FirstKey deposit — ${plan.planName ?? 'Savings Plan'}`,
+    });
+
+    this.logger.log(`Anchor book transfer ₦${amountNGN} → savings plan ${plan.id}`);
   }
 
   // ── Sync balance from Anchor ────────────────────────────────────────────────
@@ -677,6 +734,10 @@ export class SavingsService {
     );
 
     await this.recordDeposit(plan, plan.contributionAmount, reference, 'Auto-save contribution');
+
+    this.moveOnAnchor(plan.userId, plan, plan.contributionAmount, reference).catch((e) =>
+      this.logger.warn(`Anchor book transfer failed for auto-save ${plan.id}: ${e}`),
+    );
 
     this.sendSavingsEmail(
       plan.userId,
