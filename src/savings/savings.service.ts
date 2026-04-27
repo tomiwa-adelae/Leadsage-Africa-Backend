@@ -274,8 +274,8 @@ export class SavingsService {
       return { synced: false, message: 'Balance already up to date.', anchorBalance, localBalance };
     }
 
-    // Record the untracked amount as a bank transfer deposit
-    const reference = `anchor-sync-${plan.id}-${Date.now()}`;
+    // Deterministic reference so concurrent sync calls are de-duped by unique constraint
+    const reference = `anchor-sync-${plan.id}-bal${Math.round(anchorBalance * 100)}`;
     await this.recordDeposit(plan, diff, reference, 'Bank transfer (synced from Anchor)');
 
     await this.prisma.notification.create({

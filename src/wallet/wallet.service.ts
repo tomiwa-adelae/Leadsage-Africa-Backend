@@ -320,11 +320,17 @@ export class WalletService {
       return { synced: false, message: 'Balance already up to date.', anchorBalance, localBalance };
     }
 
-    const reference = `anchor-sync-wallet-${userId}-${Date.now()}`;
-    await this.creditWallet(userId, diff, 'Bank transfer (synced from Anchor)', {
-      type: 'CREDIT',
-      reference,
-    });
+    // Deterministic reference so concurrent sync calls are de-duped by unique constraint
+    const reference = `anchor-sync-wallet-${userId}-bal${Math.round(anchorBalance * 100)}`;
+    try {
+      await this.creditWallet(userId, diff, 'Bank transfer (synced from Anchor)', {
+        type: 'CREDIT',
+        reference,
+      });
+    } catch (e: any) {
+      if (e?.code === 'P2002') return { synced: false, message: 'Balance already up to date.' };
+      throw e;
+    }
 
     this.logger.log(`Synced ₦${diff} for wallet userId=${userId} from Anchor`);
     return { synced: true, credited: diff, anchorBalance, localBalance };
