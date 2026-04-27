@@ -252,7 +252,12 @@ export class WebhooksController {
       wallet.userId,
       amountNGN,
       narration,
-      { type: 'CREDIT', reference },
+      {
+        type: 'CREDIT',
+        reference,
+        ledgerEvent: 'BANK_DEPOSIT',
+        anchorEventId: data?.id,
+      },
     );
 
     await this.prisma.notification.create({

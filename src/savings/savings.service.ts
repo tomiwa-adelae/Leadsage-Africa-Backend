@@ -9,6 +9,7 @@ import { AnchorService } from 'src/anchor/anchor.service';
 import { WalletService } from 'src/wallet/wallet.service';
 import { PaystackService } from 'src/paystack/paystack.service';
 import { MailService } from 'src/mail/mail.service';
+import { LedgerService, LedgerEventType } from 'src/ledger/ledger.service';
 import { CreateSavingsDto } from './dto/create-savings.dto';
 import { UpdateSavingsDto } from './dto/update-savings.dto';
 import { Prisma } from '@prisma/client';
@@ -32,6 +33,7 @@ export class SavingsService {
     private readonly wallet: WalletService,
     private readonly paystack: PaystackService,
     private readonly mail: MailService,
+    private readonly ledger: LedgerService,
   ) {}
 
   // ── Create Plan ─────────────────────────────────────────────────────────────
@@ -178,15 +180,19 @@ export class SavingsService {
 
     // Debit wallet (DB ledger)
     const reference = `fks-dep-${randomUUID()}`;
+    const groupRef = randomUUID();
     await this.wallet.debitWallet(
       userId,
       amount,
       `FirstKey deposit — ${plan.planName ?? 'Savings Plan'}`,
-      { type: 'DEBIT', reference },
+      { type: 'DEBIT', reference, ledgerEvent: 'WALLET_TO_SAVINGS', ledgerGroupRef: groupRef },
     );
 
     // Record deposit in savings ledger
-    await this.recordDeposit(plan, amount, reference, 'Wallet deposit');
+    await this.recordDeposit(plan, amount, reference, 'Wallet deposit', {
+      eventType: 'WALLET_TO_SAVINGS',
+      groupRef,
+    });
 
     // Mirror the move on Anchor so balances stay in sync and auto-sync
     // doesn't re-credit the wallet on next page load
@@ -276,7 +282,9 @@ export class SavingsService {
 
     // Deterministic reference so concurrent sync calls are de-duped by unique constraint
     const reference = `anchor-sync-${plan.id}-bal${Math.round(anchorBalance * 100)}`;
-    await this.recordDeposit(plan, diff, reference, 'Bank transfer (synced from Anchor)');
+    await this.recordDeposit(plan, diff, reference, 'Bank transfer (synced from Anchor)', {
+      eventType: 'ANCHOR_SYNC_CORRECTION',
+    });
 
     await this.prisma.notification.create({
       data: {
@@ -395,7 +403,10 @@ export class SavingsService {
       });
     }
 
-    await this.recordDeposit(plan, amount, reference, 'Card deposit');
+    await this.recordDeposit(plan, amount, reference, 'Card deposit', {
+      eventType: 'CARD_TOPUP',
+      paystackRef: reference,
+    });
 
     await this.prisma.notification.create({
       data: {
@@ -444,7 +455,9 @@ export class SavingsService {
 
     if (plan.status !== 'ACTIVE' && plan.status !== 'PAUSED') return;
 
-    await this.recordDeposit(plan, amountNGN, reference, narration || 'Bank transfer deposit');
+    await this.recordDeposit(plan, amountNGN, reference, narration || 'Bank transfer deposit', {
+      eventType: 'BANK_DEPOSIT',
+    });
 
     // Notify user
     await this.prisma.notification.create({
@@ -503,6 +516,8 @@ export class SavingsService {
 
     const payout = balance - penalty;
     const reference = `fks-wdraw-${planId}-${Date.now()}`;
+    const groupRef = randomUUID();
+    const withdrawalEvent: LedgerEventType = isMatured ? 'WITHDRAWAL' : 'EARLY_WITHDRAWAL';
 
     await this.prisma.$transaction(async (tx) => {
       // Credit user wallet
@@ -510,7 +525,7 @@ export class SavingsService {
         userId,
         payout,
         `FirstKey ${isMatured ? 'maturity' : 'early'} withdrawal — ${plan.planName ?? 'Savings Plan'}`,
-        { type: 'CREDIT', reference },
+        { type: 'CREDIT', reference, ledgerEvent: withdrawalEvent, ledgerGroupRef: groupRef },
       );
 
       // Log penalty if any
@@ -553,6 +568,19 @@ export class SavingsService {
         },
       });
     });
+
+    // Savings-side debit ledger entry (wallet credit was recorded inside creditWallet)
+    this.ledger.record({
+      userId,
+      accountType: 'FIRSTKEY_SAVINGS',
+      entryType: 'DEBIT',
+      amount: payout,
+      balanceAfter: 0,
+      eventType: withdrawalEvent,
+      reference: `${reference}-s-dbt`,
+      description: `FirstKey ${isMatured ? 'maturity' : 'early'} withdrawal`,
+      groupRef,
+    }).catch(() => {});
 
     await this.prisma.notification.create({
       data: {
@@ -653,6 +681,7 @@ export class SavingsService {
       });
       if (exists) continue;
 
+      const newBalance = plan.totalDeposited + plan.interestEarned + interest;
       await this.prisma.$transaction([
         this.prisma.savingsTransaction.create({
           data: {
@@ -660,7 +689,7 @@ export class SavingsService {
             userId: plan.userId,
             type: 'INTEREST',
             amount: interest,
-            balance: plan.totalDeposited + plan.interestEarned + interest,
+            balance: newBalance,
             reference,
             note: `Daily interest (${(ANNUAL_INTEREST_RATE * 100).toFixed(0)}% p.a.)`,
           },
@@ -673,6 +702,18 @@ export class SavingsService {
           },
         }),
       ]);
+
+      // Ledger — interest is a credit with no external debit (it's accrued income)
+      this.ledger.record({
+        userId: plan.userId,
+        accountType: 'FIRSTKEY_SAVINGS',
+        entryType: 'CREDIT',
+        amount: interest,
+        balanceAfter: newBalance,
+        eventType: 'INTEREST',
+        reference: `${reference}-led`,
+        description: `Daily interest (${(ANNUAL_INTEREST_RATE * 100).toFixed(0)}% p.a.)`,
+      }).catch(() => {});
 
       count++;
     }
@@ -726,14 +767,18 @@ export class SavingsService {
     }
 
     const reference = `fks-auto-${plan.id}-${now.getTime()}`;
+    const groupRef = randomUUID();
     await this.wallet.debitWallet(
       plan.userId,
       plan.contributionAmount,
       `FirstKey auto-save — ${plan.planName ?? 'Savings Plan'}`,
-      { type: 'DEBIT', reference },
+      { type: 'DEBIT', reference, ledgerEvent: 'SCHEDULED_CONTRIBUTION_WALLET', ledgerGroupRef: groupRef },
     );
 
-    await this.recordDeposit(plan, plan.contributionAmount, reference, 'Auto-save contribution');
+    await this.recordDeposit(plan, plan.contributionAmount, reference, 'Auto-save contribution', {
+      eventType: 'SCHEDULED_CONTRIBUTION_WALLET',
+      groupRef,
+    });
 
     this.moveOnAnchor(plan.userId, plan, plan.contributionAmount, reference).catch((e) =>
       this.logger.warn(`Anchor book transfer failed for auto-save ${plan.id}: ${e}`),
@@ -794,7 +839,10 @@ export class SavingsService {
     }
 
     const amount = result.amount / 100;
-    await this.recordDeposit(plan, amount, reference, 'Card auto-save');
+    await this.recordDeposit(plan, amount, reference, 'Card auto-save', {
+      eventType: 'SCHEDULED_CONTRIBUTION_CARD',
+      paystackRef: reference,
+    });
 
     this.sendSavingsEmail(
       plan.userId,
@@ -884,6 +932,12 @@ export class SavingsService {
     amount: number,
     reference: string,
     note: string,
+    ledgerOpts?: {
+      eventType?: LedgerEventType;
+      groupRef?: string;
+      paystackRef?: string;
+      anchorEventId?: string;
+    },
   ) {
     const newBalance = plan.totalDeposited + amount;
     const nextContributionAt = plan.paymentMethod === 'WALLET'
@@ -916,6 +970,58 @@ export class SavingsService {
     } catch (e: any) {
       if (e?.code === 'P2002') return; // duplicate reference — already recorded
       throw e;
+    }
+
+    // Dual-write to ledger — non-blocking
+    const eventType = ledgerOpts?.eventType ?? 'BANK_DEPOSIT';
+    const debitAccount =
+      eventType === 'WALLET_TO_SAVINGS' || eventType === 'SCHEDULED_CONTRIBUTION_WALLET'
+        ? 'WALLET'
+        : 'EXTERNAL';
+
+    if (debitAccount === 'WALLET') {
+      // Wallet side already recorded by debitWallet with same groupRef — only record savings credit
+      this.ledger.record({
+        userId: plan.userId,
+        accountType: 'FIRSTKEY_SAVINGS',
+        entryType: 'CREDIT',
+        amount,
+        balanceAfter: newBalance,
+        eventType,
+        reference: `${reference}-s-crd`,
+        description: note,
+        groupRef: ledgerOpts?.groupRef,
+        paystackRef: ledgerOpts?.paystackRef,
+        anchorEventId: ledgerOpts?.anchorEventId,
+      }).catch(() => {});
+    } else {
+      // External source — record full pair
+      this.ledger.recordPair(
+        {
+          userId: plan.userId,
+          accountType: 'EXTERNAL',
+          amount,
+          balanceAfter: 0,
+          eventType,
+          reference: `${reference}-ext-dbt`,
+          description: note,
+          groupRef: ledgerOpts?.groupRef,
+          paystackRef: ledgerOpts?.paystackRef,
+          anchorEventId: ledgerOpts?.anchorEventId,
+        },
+        {
+          userId: plan.userId,
+          accountType: 'FIRSTKEY_SAVINGS',
+          amount,
+          balanceAfter: newBalance,
+          eventType,
+          reference: `${reference}-s-crd`,
+          description: note,
+          groupRef: ledgerOpts?.groupRef,
+          paystackRef: ledgerOpts?.paystackRef,
+          anchorEventId: ledgerOpts?.anchorEventId,
+        },
+      ).catch(() => {});
     }
   }
 

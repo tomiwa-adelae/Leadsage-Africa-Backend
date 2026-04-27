@@ -9,8 +9,10 @@ import {
   Patch,
   Post,
   Query,
+  Res,
   UseGuards,
 } from '@nestjs/common';
+import { Response } from 'express';
 import { JwtAuthGuard } from 'src/auth/guards/jwt-auth.guard';
 import { PositionGuard } from 'src/auth/guards/position.guard';
 import { CurrentUser } from 'src/decorators/current-user.decorator';
@@ -294,5 +296,56 @@ export class AdminController {
   @HttpCode(HttpStatus.OK)
   releaseOverdueEscrows() {
     return this.adminService.releaseOverdueEscrows();
+  }
+
+  // ── Ledger ─────────────────────────────────────────────────────────────────
+
+  @Get('ledger/entries')
+  getLedgerEntries(
+    @Query('userId') userId?: string,
+    @Query('search') search?: string,
+    @Query('accountType') accountType?: string,
+    @Query('eventType') eventType?: string,
+    @Query('entryType') entryType?: string,
+    @Query('dateFrom') dateFrom?: string,
+    @Query('dateTo') dateTo?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.adminService.getLedgerEntries({
+      userId,
+      search,
+      accountType,
+      eventType,
+      entryType,
+      dateFrom,
+      dateTo,
+      page: page ? parseInt(page, 10) : 1,
+      limit: limit ? parseInt(limit, 10) : 50,
+    });
+  }
+
+  @Get('ledger/stats')
+  getLedgerStats() {
+    return this.adminService.getLedgerStats();
+  }
+
+  @Get('ledger/export')
+  async exportLedger(
+    @Res() res: Response,
+    @Query('userId') userId?: string,
+    @Query('accountType') accountType?: string,
+    @Query('eventType') eventType?: string,
+    @Query('entryType') entryType?: string,
+    @Query('dateFrom') dateFrom?: string,
+    @Query('dateTo') dateTo?: string,
+  ) {
+    const csv = await this.adminService.exportLedgerCsv({
+      userId, accountType, eventType, entryType, dateFrom, dateTo,
+    });
+    const filename = `leadsage-ledger-${new Date().toISOString().slice(0, 10)}.csv`;
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(csv);
   }
 }

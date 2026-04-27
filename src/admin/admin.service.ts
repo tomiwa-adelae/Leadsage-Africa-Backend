@@ -1414,4 +1414,156 @@ export class AdminService {
 
     return { backfilled, released };
   }
+
+  // ── Ledger ─────────────────────────────────────────────────────────────────
+
+  async getLedgerEntries(query: {
+    userId?: string;
+    search?: string;
+    accountType?: string;
+    eventType?: string;
+    entryType?: string;
+    dateFrom?: string;
+    dateTo?: string;
+    page?: number;
+    limit?: number;
+  }) {
+    const page = query.page ?? 1;
+    const limit = Math.min(query.limit ?? 50, 100);
+    const skip = (page - 1) * limit;
+
+    // Build user filter when searching by name/email
+    let userIds: string[] | undefined;
+    if (query.search && !query.userId) {
+      const matchedUsers = await this.prisma.user.findMany({
+        where: {
+          OR: [
+            { firstName: { contains: query.search, mode: 'insensitive' } },
+            { lastName: { contains: query.search, mode: 'insensitive' } },
+            { email: { contains: query.search, mode: 'insensitive' } },
+          ],
+        },
+        select: { id: true },
+      });
+      userIds = matchedUsers.map((u) => u.id);
+      if (userIds.length === 0) return { entries: [], total: 0, page, limit, stats: null };
+    }
+
+    const where: any = {
+      ...(query.userId ? { userId: query.userId } : {}),
+      ...(userIds ? { userId: { in: userIds } } : {}),
+      ...(query.accountType ? { accountType: query.accountType } : {}),
+      ...(query.eventType ? { eventType: query.eventType } : {}),
+      ...(query.entryType ? { entryType: query.entryType } : {}),
+      ...(query.dateFrom || query.dateTo
+        ? {
+            createdAt: {
+              ...(query.dateFrom ? { gte: new Date(query.dateFrom) } : {}),
+              // Extend dateTo to end-of-day so the full selected day is included
+              ...(query.dateTo
+                ? { lte: new Date(new Date(query.dateTo).setHours(23, 59, 59, 999)) }
+                : {}),
+            },
+          }
+        : {}),
+    };
+
+    const [entries, total] = await Promise.all([
+      this.prisma.ledgerEntry.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+        skip,
+        include: {
+          user: { select: { id: true, firstName: true, lastName: true, email: true, image: true } },
+        },
+      }),
+      this.prisma.ledgerEntry.count({ where }),
+    ]);
+
+    return { entries, total, page, limit };
+  }
+
+  async getLedgerStats() {
+    const [totalEntries, unreconciledCount, accountSummary] = await Promise.all([
+      this.prisma.ledgerEntry.count(),
+      this.prisma.ledgerEntry.count({ where: { reconciled: false } }),
+      this.prisma.ledgerEntry.groupBy({
+        by: ['accountType', 'entryType'],
+        _sum: { amount: true },
+        _count: { id: true },
+      }),
+    ]);
+
+    // Shape into { WALLET: { credits, debits }, FIRSTKEY_SAVINGS: {...}, ... }
+    const summary: Record<string, { credits: number; debits: number; count: number }> = {};
+    for (const row of accountSummary) {
+      if (!summary[row.accountType]) summary[row.accountType] = { credits: 0, debits: 0, count: 0 };
+      const amount = Number(row._sum.amount ?? 0);
+      summary[row.accountType].count += row._count.id;
+      if (row.entryType === 'CREDIT') summary[row.accountType].credits += amount;
+      else summary[row.accountType].debits += amount;
+    }
+
+    return { totalEntries, unreconciledCount, summary };
+  }
+
+  async exportLedgerCsv(query: {
+    userId?: string;
+    accountType?: string;
+    eventType?: string;
+    entryType?: string;
+    dateFrom?: string;
+    dateTo?: string;
+  }): Promise<string> {
+    const where: any = {
+      ...(query.userId ? { userId: query.userId } : {}),
+      ...(query.accountType ? { accountType: query.accountType } : {}),
+      ...(query.eventType ? { eventType: query.eventType } : {}),
+      ...(query.entryType ? { entryType: query.entryType } : {}),
+      ...(query.dateFrom || query.dateTo
+        ? {
+            createdAt: {
+              ...(query.dateFrom ? { gte: new Date(query.dateFrom) } : {}),
+              ...(query.dateTo
+                ? { lte: new Date(new Date(query.dateTo).setHours(23, 59, 59, 999)) }
+                : {}),
+            },
+          }
+        : {}),
+    };
+
+    const entries = await this.prisma.ledgerEntry.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: 10000,
+      include: {
+        user: { select: { firstName: true, lastName: true, email: true } },
+      },
+    });
+
+    const headers = [
+      'Date', 'User', 'Email', 'Account', 'Entry Type', 'Event',
+      'Description', 'Amount (NGN)', 'Balance After (NGN)', 'Reference', 'Group Ref',
+      'Paystack Ref', 'Anchor Event ID',
+    ];
+
+    const rows = entries.map((e) => [
+      new Date(e.createdAt).toISOString(),
+      `${e.user?.firstName ?? ''} ${e.user?.lastName ?? ''}`.trim(),
+      e.user?.email ?? '',
+      e.accountType,
+      e.entryType,
+      e.eventType,
+      `"${(e.description ?? '').replace(/"/g, '""')}"`,
+      Number(e.amount).toFixed(2),
+      Number(e.balanceAfter).toFixed(2),
+      e.reference,
+      e.groupRef ?? '',
+      e.paystackRef ?? '',
+      e.anchorEventId ?? '',
+    ]);
+
+    return [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+  }
 }

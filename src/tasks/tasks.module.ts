@@ -6,12 +6,13 @@ import { AnchorService } from 'src/anchor/anchor.service';
 import { PaystackService } from 'src/paystack/paystack.service';
 import { WalletService } from 'src/wallet/wallet.service';
 import { SavingsService } from 'src/savings/savings.service';
+import { LedgerModule } from 'src/ledger/ledger.module';
 import { BookingExpiryService } from './booking-expiry.service';
 import { EscrowReleaseService } from './escrow-release.service';
 import { SavingsCronService } from './savings-cron.service';
 
 @Module({
-  imports: [ScheduleModule.forRoot()],
+  imports: [ScheduleModule.forRoot(), LedgerModule],
   providers: [
     BookingExpiryService,
     EscrowReleaseService,

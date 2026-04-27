@@ -10,6 +10,7 @@ import { PrismaService } from 'src/prisma/prisma.service';
 import { AnchorService } from 'src/anchor/anchor.service';
 import { PaystackService } from 'src/paystack/paystack.service';
 import { EncryptionService } from 'src/encryption/encryption.service';
+import { LedgerService, LedgerEventType } from 'src/ledger/ledger.service';
 import { randomUUID } from 'crypto';
 
 const COMMISSION_RATE = 0.05; // 5%
@@ -25,6 +26,7 @@ export class WalletService {
     private readonly anchor: AnchorService,
     private readonly paystack: PaystackService,
     private readonly encryption: EncryptionService,
+    private readonly ledger: LedgerService,
   ) {}
 
   // ── Wallet provisioning ────────────────────────────────────────────────────
@@ -284,6 +286,8 @@ export class WalletService {
       await this.creditWallet(userId, amountNGN, 'Card top-up', {
         type: 'CREDIT',
         reference,
+        ledgerEvent: 'CARD_TOPUP',
+        paystackRef: reference,
       });
     } catch (e: any) {
       if (e?.code === 'P2002') return { success: true, alreadyVerified: true };
@@ -326,6 +330,7 @@ export class WalletService {
       await this.creditWallet(userId, diff, 'Bank transfer (synced from Anchor)', {
         type: 'CREDIT',
         reference,
+        ledgerEvent: 'ANCHOR_SYNC_CORRECTION',
       });
     } catch (e: any) {
       if (e?.code === 'P2002') return { synced: false, message: 'Balance already up to date.' };
@@ -523,6 +528,11 @@ export class WalletService {
       rentalPaymentId?: string;
       escrowId?: string;
       reference?: string;
+      // Ledger
+      ledgerEvent?: LedgerEventType;
+      ledgerGroupRef?: string;
+      paystackRef?: string;
+      anchorEventId?: string;
     },
   ) {
     const wallet = await this.prisma.walletAccount.findUnique({
@@ -531,6 +541,7 @@ export class WalletService {
     if (!wallet) throw new NotFoundException('Wallet not found');
 
     const newBalance = wallet.availableBalance + amountNGN;
+    const ref = opts?.reference ?? randomUUID();
 
     await this.prisma.$transaction([
       this.prisma.walletAccount.update({
@@ -545,13 +556,46 @@ export class WalletService {
           amount: amountNGN,
           balanceAfter: newBalance,
           description,
-          reference: opts?.reference ?? randomUUID(),
+          reference: ref,
           bookingId: opts?.bookingId,
           rentalPaymentId: opts?.rentalPaymentId,
           escrowId: opts?.escrowId,
         },
       }),
     ]);
+
+    // Dual-write to immutable ledger — non-blocking
+    const eventType = opts?.ledgerEvent ?? 'BANK_DEPOSIT';
+    const debitAccount =
+      eventType === 'ESCROW_RELEASE' || eventType === 'ESCROW_REFUND' ? 'ESCROW'
+      : eventType === 'WITHDRAWAL' ? 'FIRSTKEY_SAVINGS'
+      : 'EXTERNAL';
+    this.ledger.recordPair(
+      {
+        userId,
+        accountType: debitAccount,
+        amount: amountNGN,
+        balanceAfter: 0, // we don't track EXTERNAL/ESCROW balance here
+        eventType,
+        reference: `${ref}-dbt`,
+        description,
+        groupRef: opts?.ledgerGroupRef,
+        paystackRef: opts?.paystackRef,
+        anchorEventId: opts?.anchorEventId,
+      },
+      {
+        userId,
+        accountType: 'WALLET',
+        amount: amountNGN,
+        balanceAfter: newBalance,
+        eventType,
+        reference: `${ref}-crd`,
+        description,
+        groupRef: opts?.ledgerGroupRef,
+        paystackRef: opts?.paystackRef,
+        anchorEventId: opts?.anchorEventId,
+      },
+    ).catch(() => {});
   }
 
   async debitWallet(
@@ -564,6 +608,9 @@ export class WalletService {
       rentalPaymentId?: string;
       escrowId?: string;
       reference?: string;
+      // Ledger
+      ledgerEvent?: LedgerEventType;
+      ledgerGroupRef?: string;
     },
   ) {
     const wallet = await this.prisma.walletAccount.findUnique({
@@ -574,6 +621,7 @@ export class WalletService {
       throw new BadRequestException('Insufficient wallet balance');
 
     const newBalance = wallet.availableBalance - amountNGN;
+    const ref = opts?.reference ?? randomUUID();
 
     await this.prisma.$transaction([
       this.prisma.walletAccount.update({
@@ -588,13 +636,42 @@ export class WalletService {
           amount: amountNGN,
           balanceAfter: newBalance,
           description,
-          reference: opts?.reference ?? randomUUID(),
+          reference: ref,
           bookingId: opts?.bookingId,
           rentalPaymentId: opts?.rentalPaymentId,
           escrowId: opts?.escrowId,
         },
       }),
     ]);
+
+    // Dual-write to immutable ledger — non-blocking
+    const eventType = opts?.ledgerEvent ?? 'WITHDRAWAL';
+    const creditAccount =
+      eventType === 'ESCROW_HOLD' ? 'ESCROW'
+      : eventType === 'WALLET_TO_SAVINGS' || eventType === 'SCHEDULED_CONTRIBUTION_WALLET' ? 'FIRSTKEY_SAVINGS'
+      : 'EXTERNAL';
+    this.ledger.recordPair(
+      {
+        userId,
+        accountType: 'WALLET',
+        amount: amountNGN,
+        balanceAfter: newBalance,
+        eventType,
+        reference: `${ref}-dbt`,
+        description,
+        groupRef: opts?.ledgerGroupRef,
+      },
+      {
+        userId,
+        accountType: creditAccount,
+        amount: amountNGN,
+        balanceAfter: 0,
+        eventType,
+        reference: `${ref}-crd`,
+        description,
+        groupRef: opts?.ledgerGroupRef,
+      },
+    ).catch(() => {});
   }
 
   // ── Escrow ────────────────────────────────────────────────────────────────
@@ -672,6 +749,7 @@ export class WalletService {
         type: 'ESCROW_HOLD',
         bookingId: params.bookingId,
         rentalPaymentId: params.rentalPaymentId,
+        ledgerEvent: 'ESCROW_HOLD',
       },
     );
 
@@ -713,7 +791,7 @@ export class WalletService {
       escrow.landlordId,
       escrow.netAmount,
       `Payment released from escrow`,
-      { type: 'ESCROW_RELEASE', escrowId },
+      { type: 'ESCROW_RELEASE', escrowId, ledgerEvent: 'ESCROW_RELEASE' },
     );
 
     this.logger.log(
@@ -741,7 +819,7 @@ export class WalletService {
         escrow.payerId,
         escrow.amount,
         'Refund from cancelled booking',
-        { type: 'REFUND', escrowId },
+        { type: 'REFUND', escrowId, ledgerEvent: 'ESCROW_REFUND' },
       );
     }
     // If funded by card — Paystack refund is handled separately via PaystackService
@@ -856,9 +934,7 @@ export class WalletService {
       userId,
       amountNGN,
       `Withdrawal to ${bankAccountName}`,
-      {
-        type: 'WITHDRAWAL',
-      },
+      { type: 'WITHDRAWAL', ledgerEvent: 'WITHDRAWAL' },
     );
 
     // Initiate NIP transfer from master Anchor account

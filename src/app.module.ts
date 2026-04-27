@@ -17,6 +17,7 @@ import { SavingsModule } from './savings/savings.module';
 import { UploadModule } from './upload/upload.module';
 import { EncryptionModule } from './encryption/encryption.module';
 import { BlogModule } from './blog/blog.module';
+import { LedgerModule } from './ledger/ledger.module';
 
 @Module({
   imports: [
@@ -36,6 +37,7 @@ import { BlogModule } from './blog/blog.module';
     TasksModule,
     UploadModule,
     BlogModule,
+    LedgerModule,
   ],
   controllers: [AppController],
   providers: [AppService],

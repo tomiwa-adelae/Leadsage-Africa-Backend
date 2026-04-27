@@ -86,6 +86,7 @@ model User {
   escrowsAsLandlord PaymentEscrow[]     @relation("EscrowLandlord")
   firstKeySavings   FirstKeySavings[]
   posts             Post[]              @relation("AuthoredPosts")
+  ledgerEntries     LedgerEntry[]
 }
 
 enum AdminPosition {
@@ -732,6 +733,71 @@ enum SavingsTxType {
   WITHDRAWAL
   PENALTY
   REFUND
+}
+
+// ── Ledger ─────────────────────────────────────────────────────────────────────
+
+model LedgerEntry {
+  id           String          @id @default(uuid())
+  userId       String
+  accountType  LedgerAccount
+  entryType    LedgerEntryType
+  amount       Decimal         @db.Decimal(14, 2)
+  balanceAfter Decimal         @db.Decimal(14, 2)
+
+  eventType   LedgerEvent
+  reference   String      @unique
+  description String
+
+  // Links both legs of an internal transfer (e.g. wallet → savings)
+  groupRef String?
+
+  // External system references for reconciliation
+  anchorEventId    String?
+  anchorTransferId String?
+  paystackRef      String?
+
+  // Reconciliation flag
+  reconciled   Boolean   @default(false)
+  reconciledAt DateTime?
+
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, accountType])
+  @@index([groupRef])
+  @@index([createdAt])
+  @@index([reconciled])
+}
+
+enum LedgerAccount {
+  WALLET
+  FIRSTKEY_SAVINGS
+  ESCROW
+  EXTERNAL
+}
+
+enum LedgerEntryType {
+  DEBIT
+  CREDIT
+}
+
+enum LedgerEvent {
+  BANK_DEPOSIT
+  CARD_TOPUP
+  WALLET_TO_SAVINGS
+  SCHEDULED_CONTRIBUTION_WALLET
+  SCHEDULED_CONTRIBUTION_CARD
+  INTEREST
+  WITHDRAWAL
+  EARLY_WITHDRAWAL
+  ESCROW_HOLD
+  ESCROW_RELEASE
+  ESCROW_REFUND
+  ANCHOR_SYNC_CORRECTION
+  REVERSAL
 }
 
 // Blog Posts
