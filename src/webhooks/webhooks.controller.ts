@@ -171,18 +171,30 @@ export class WebhooksController {
     const data = event?.data ?? event;
     const attrs = data?.attributes ?? {};
     const relationships = data?.relationships ?? {};
+    const included: any[] = event?.included ?? [];
 
-    // Amount — Anchor sends kobo
-    const amountKobo: number = attrs?.amount ?? data?.amount ?? 0;
+    // For nip.inbound.* events the transfer detail is in the included array, not data.attributes
+    const transferObj = included.find((inc: any) =>
+      inc.type === 'InboundNIPTransfer' || inc.type === 'NipInboundTransfer' ||
+      inc.type === 'InboundTransfer',
+    );
+
+    // Amount — Anchor sends kobo; nip.inbound.* events carry amount in included transfer
+    const amountKobo: number =
+      transferObj?.attributes?.amount ??
+      attrs?.amount ??
+      attrs?.payment?.amount ??
+      data?.amount ??
+      0;
     const amountNGN = amountKobo / 100;
     if (amountNGN <= 0) return;
 
     // Find destination account
-    // NIP inbound: relationships.account.data.id  OR  attrs.destinationAccountId
     const anchorAccountId: string =
       relationships?.account?.data?.id ??
       relationships?.destinationAccount?.data?.id ??
       attrs?.destinationAccountId ??
+      attrs?.payment?.settlementAccount?.accountId ??
       attrs?.accountId ??
       data?.accountId ??
       '';
@@ -192,11 +204,22 @@ export class WebhooksController {
       return;
     }
 
-    // Idempotency key — prefer Anchor's own transaction/event ID
-    const anchorRef: string = data?.id ?? attrs?.reference ?? attrs?.sessionId ?? '';
-    const reference = `anchor-${anchorRef || Date.now()}`;
+    // Idempotency — use the transfer's own reference so that the 3 events fired per transfer
+    // (nip.inbound.received / completed / settled) all map to the same DB reference and only
+    // the first one credits; subsequent ones hit the unique constraint and are ignored.
+    const transferRef: string =
+      transferObj?.attributes?.reference ??
+      transferObj?.id ??
+      relationships?.transfer?.data?.id ??
+      attrs?.payment?.paymentReference ??
+      attrs?.reference ??
+      attrs?.sessionId ??
+      data?.id ??
+      '';
+    const reference = `anchor-inbound-${transferRef || Date.now()}`;
 
     const narration: string =
+      transferObj?.attributes?.description ??
       attrs?.narration ?? attrs?.description ?? attrs?.remark ?? 'Bank transfer received';
 
     // ── Check if this is a savings plan account ────────────────────────────
