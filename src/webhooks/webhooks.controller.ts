@@ -8,6 +8,7 @@ import {
   HttpStatus,
   Logger,
 } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiExcludeEndpoint } from '@nestjs/swagger';
 import { Request } from 'express';
 import { createHmac } from 'crypto';
 import { PaystackService } from 'src/paystack/paystack.service';
@@ -15,6 +16,7 @@ import { PrismaService } from 'src/prisma/prisma.service';
 import { WalletService } from 'src/wallet/wallet.service';
 import { SavingsService } from 'src/savings/savings.service';
 
+@ApiTags('webhooks')
 @Controller('webhooks')
 export class WebhooksController {
   private readonly logger = new Logger(WebhooksController.name);
@@ -28,6 +30,7 @@ export class WebhooksController {
 
   // ── Anchor webhook ─────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Anchor webhook receiver (HMAC-verified)' })
   @Post('anchor')
   @HttpCode(HttpStatus.OK)
   async handleAnchor(
@@ -104,7 +107,6 @@ export class WebhooksController {
     }
 
     // ── Inbound NIP / RTP / Pay — money arrived into a virtual account ─────────
-    // Live Anchor uses "nip.incomingTransfer.*"; older/sandbox used "nip.inbound_*"
     const INBOUND_EVENTS = [
       'nip.incomingtransfer.received',
       'nip.incomingtransfer.completed',
@@ -142,7 +144,6 @@ export class WebhooksController {
     const accountName: string = attrs?.accountName ?? attrs?.name ?? '';
     const bankName: string = attrs?.bank?.name ?? '';
 
-    // The account this NUBAN belongs to
     const anchorAccountId: string =
       data?.relationships?.settlementAccount?.data?.id ??
       data?.relationships?.account?.data?.id ??
@@ -151,13 +152,11 @@ export class WebhooksController {
 
     if (!anchorAccountId || !accountNumber) return;
 
-    // Update wallet if it matches
     await this.prisma.walletAccount.updateMany({
       where: { anchorAccountId, virtualAccountNo: null },
       data: { virtualAccountNo: accountNumber, virtualAccountName: accountName, virtualBankName: bankName },
     }).catch(() => {});
 
-    // Update savings plan if it matches
     await this.prisma.firstKeySavings.updateMany({
       where: { anchorAccountId, nuban: null },
       data: { nuban: accountNumber, bankName, accountName },
@@ -167,19 +166,16 @@ export class WebhooksController {
   }
 
   private async handleAnchorInbound(event: any) {
-    // Anchor wraps payload in event.data (JSON:API style)
     const data = event?.data ?? event;
     const attrs = data?.attributes ?? {};
     const relationships = data?.relationships ?? {};
     const included: any[] = event?.included ?? [];
 
-    // For nip.inbound.* events the transfer detail is in the included array, not data.attributes
     const transferObj = included.find((inc: any) =>
       inc.type === 'InboundNIPTransfer' || inc.type === 'NipInboundTransfer' ||
       inc.type === 'InboundTransfer',
     );
 
-    // Amount — Anchor sends kobo; nip.inbound.* events carry amount in included transfer
     const amountKobo: number =
       transferObj?.attributes?.amount ??
       attrs?.amount ??
@@ -189,7 +185,6 @@ export class WebhooksController {
     const amountNGN = amountKobo / 100;
     if (amountNGN <= 0) return;
 
-    // Find destination account
     const anchorAccountId: string =
       relationships?.account?.data?.id ??
       relationships?.destinationAccount?.data?.id ??
@@ -204,9 +199,6 @@ export class WebhooksController {
       return;
     }
 
-    // Idempotency — use the transfer's own reference so that the 3 events fired per transfer
-    // (nip.inbound.received / completed / settled) all map to the same DB reference and only
-    // the first one credits; subsequent ones hit the unique constraint and are ignored.
     const transferRef: string =
       transferObj?.attributes?.reference ??
       transferObj?.id ??
@@ -275,6 +267,7 @@ export class WebhooksController {
 
   // ── Paystack webhook ───────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Paystack webhook receiver (HMAC-verified)' })
   @Post('paystack')
   @HttpCode(HttpStatus.OK)
   async handlePaystack(
@@ -342,7 +335,6 @@ export class WebhooksController {
         },
       });
 
-      // Create escrow — release 24h after check-in
       const hoursUntilCheckin = Math.max(
         24,
         Math.ceil((new Date(booking.checkIn).getTime() - Date.now()) / 3_600_000) + 24,

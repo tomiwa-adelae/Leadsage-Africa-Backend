@@ -10,12 +10,15 @@ import {
   HttpStatus,
   UseGuards,
 } from '@nestjs/common';
+import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody } from '@nestjs/swagger';
 import { JwtAuthGuard } from 'src/auth/guards/jwt-auth.guard';
 import { CurrentUser } from 'src/decorators/current-user.decorator';
 import { CreateSavingsDto } from './dto/create-savings.dto';
 import { UpdateSavingsDto } from './dto/update-savings.dto';
 import { SavingsService } from './savings.service';
 
+@ApiTags('savings')
+@ApiBearerAuth()
 @UseGuards(JwtAuthGuard)
 @Controller('savings')
 export class SavingsController {
@@ -23,11 +26,14 @@ export class SavingsController {
 
   // ── Plans ──────────────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Get all savings plans for the current user' })
   @Get()
   getMyPlans(@CurrentUser() user: { id: string }) {
     return this.savingsService.getMyPlans(user.id);
   }
 
+  @ApiOperation({ summary: 'Create a new savings plan' })
+  @ApiBody({ type: CreateSavingsDto })
   @Post()
   @HttpCode(HttpStatus.CREATED)
   createPlan(
@@ -37,6 +43,7 @@ export class SavingsController {
     return this.savingsService.createPlan(user.id, dto);
   }
 
+  @ApiOperation({ summary: 'Get a savings plan by ID' })
   @Get(':id')
   getPlanById(
     @CurrentUser() user: { id: string },
@@ -45,6 +52,7 @@ export class SavingsController {
     return this.savingsService.getPlanById(user.id, id);
   }
 
+  @ApiOperation({ summary: 'Get transactions for a savings plan' })
   @Get(':id/transactions')
   getTransactions(
     @CurrentUser() user: { id: string },
@@ -55,6 +63,8 @@ export class SavingsController {
     return this.savingsService.getTransactions(user.id, id, +page, +limit);
   }
 
+  @ApiOperation({ summary: 'Update savings plan settings' })
+  @ApiBody({ type: UpdateSavingsDto })
   @Patch(':id')
   updateSettings(
     @CurrentUser() user: { id: string },
@@ -66,6 +76,8 @@ export class SavingsController {
 
   // ── Actions ────────────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Deposit into a savings plan from wallet balance' })
+  @ApiBody({ schema: { type: 'object', required: ['amount'], properties: { amount: { type: 'number', example: 5000 } } } })
   @Post(':id/deposit')
   @HttpCode(HttpStatus.OK)
   deposit(
@@ -76,6 +88,8 @@ export class SavingsController {
     return this.savingsService.depositFromWallet(user.id, id, amount);
   }
 
+  @ApiOperation({ summary: 'Initialize a card deposit into a savings plan' })
+  @ApiBody({ schema: { type: 'object', required: ['amount'], properties: { amount: { type: 'number', example: 5000 } } } })
   @Post(':id/deposit/card')
   @HttpCode(HttpStatus.OK)
   initializeCardDeposit(
@@ -86,6 +100,8 @@ export class SavingsController {
     return this.savingsService.initializeCardDeposit(user.id, id, amount);
   }
 
+  @ApiOperation({ summary: 'Verify a card deposit into a savings plan' })
+  @ApiBody({ schema: { type: 'object', required: ['reference'], properties: { reference: { type: 'string', example: 'trx_abc123' } } } })
   @Post(':id/deposit/card/verify')
   @HttpCode(HttpStatus.OK)
   verifyCardDeposit(
@@ -96,6 +112,7 @@ export class SavingsController {
     return this.savingsService.verifyCardDeposit(user.id, id, reference);
   }
 
+  @ApiOperation({ summary: 'Withdraw from a matured savings plan to wallet' })
   @Post(':id/withdraw')
   @HttpCode(HttpStatus.OK)
   withdraw(
@@ -105,6 +122,7 @@ export class SavingsController {
     return this.savingsService.withdraw(user.id, id);
   }
 
+  @ApiOperation({ summary: 'Sync savings plan balance from Anchor' })
   @Post(':id/sync')
   @HttpCode(HttpStatus.OK)
   syncFromAnchor(
@@ -114,6 +132,7 @@ export class SavingsController {
     return this.savingsService.syncFromAnchor(user.id, id);
   }
 
+  @ApiOperation({ summary: 'Provision a virtual account for a savings plan' })
   @Post(':id/provision-account')
   @HttpCode(HttpStatus.OK)
   provisionAccount(
@@ -123,6 +142,7 @@ export class SavingsController {
     return this.savingsService.provisionAccount(user.id, id);
   }
 
+  @ApiOperation({ summary: 'Pause a savings plan' })
   @Post(':id/pause')
   @HttpCode(HttpStatus.OK)
   pause(
@@ -132,6 +152,7 @@ export class SavingsController {
     return this.savingsService.pause(user.id, id);
   }
 
+  @ApiOperation({ summary: 'Resume a paused savings plan' })
   @Post(':id/resume')
   @HttpCode(HttpStatus.OK)
   resume(

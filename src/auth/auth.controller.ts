@@ -13,6 +13,7 @@ import {
   Res,
   UseGuards,
 } from '@nestjs/common';
+import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { LocalAuthGuard } from './guards/local-auth.guard';
 import type { Response, Request as ExpressRequest } from 'express';
@@ -27,10 +28,13 @@ import { ChangePasswordDto } from './dto/change-password.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { CurrentUser } from 'src/decorators/current-user.decorator';
 
+@ApiTags('auth')
 @Controller('auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
+  @ApiOperation({ summary: 'Log in with email & password (sets HttpOnly cookies)' })
+  @ApiBody({ schema: { type: 'object', required: ['email', 'password'], properties: { email: { type: 'string', example: 'user@example.com' }, password: { type: 'string', example: 'Password123!' }, turnstileToken: { type: 'string', description: 'Cloudflare Turnstile token (optional in dev)' } } } })
   @UseGuards(LocalAuthGuard)
   @Post('login')
   @HttpCode(HttpStatus.OK)
@@ -44,10 +48,6 @@ export class AuthController {
     const cookieOptions = this.authService.getCookieOptions();
     const sessionMs = this.authService.getSessionMs(); // 30 days
 
-    // The refresh token cookie lives for the full 30-day session.
-    // The access token cookie also gets a 30-day maxAge so the browser never
-    // drops it early — but the JWT inside expires in 15 min, triggering a
-    // silent refresh via the axios interceptor.
     res.cookie('refreshToken', refresh_token, {
       ...cookieOptions,
       maxAge: sessionMs,
@@ -61,6 +61,8 @@ export class AuthController {
     return res.json({ user, message: `Welcome back, ${user.firstName}` });
   }
 
+  @ApiOperation({ summary: 'Register a new user account' })
+  @ApiBody({ type: RegisterUserDto })
   @Post('register')
   @HttpCode(HttpStatus.CREATED)
   async registerUser(@Body() registerUser: RegisterUserDto) {
@@ -68,6 +70,8 @@ export class AuthController {
     return this.authService.register(registerUser);
   }
 
+  @ApiOperation({ summary: 'Verify email with OTP and receive session cookies' })
+  @ApiBody({ schema: { type: 'object', required: ['email', 'otp'], properties: { email: { type: 'string', example: 'user@example.com' }, otp: { type: 'string', example: '123456' } } } })
   @Post('verify-email')
   @HttpCode(HttpStatus.OK)
   async verifyEmail(
@@ -93,12 +97,15 @@ export class AuthController {
     return res.json({ user, message: `Welcome to Leadsage, ${user.firstName}` });
   }
 
+  @ApiOperation({ summary: 'Resend email verification OTP' })
+  @ApiBody({ schema: { type: 'object', required: ['email'], properties: { email: { type: 'string', example: 'user@example.com' } } } })
   @Post('resend-email-verification')
   @HttpCode(HttpStatus.OK)
   async resendEmailVerification(@Body() body: { email: string }) {
     return this.authService.sendEmailVerificationOTP(body.email);
   }
 
+  @ApiOperation({ summary: 'Log out and clear session cookies' })
   @Post('logout')
   @HttpCode(HttpStatus.OK)
   async logout(@Req() req: ExpressRequest, @Res() res: Response) {
@@ -114,6 +121,8 @@ export class AuthController {
     return res.json({ message: "You've been logged out successfully" });
   }
 
+  @ApiOperation({ summary: 'Send a password reset OTP' })
+  @ApiBody({ type: ForgotPasswordDto })
   @Post('forgot-password')
   @HttpCode(HttpStatus.OK)
   async forgotPassword(@Body() forgotPasswordDto: ForgotPasswordDto) {
@@ -121,17 +130,18 @@ export class AuthController {
     return this.authService.sendPasswordResetOTP(forgotPasswordDto.email);
   }
 
+  @ApiOperation({ summary: 'Verify a password reset OTP' })
+  @ApiBody({ type: VerifyCodeDto })
   @Post('verify-code')
   @HttpCode(HttpStatus.OK)
   async verifyCode(@Body() verifyCodeDto: VerifyCodeDto) {
     return this.authService.verifyCode(verifyCodeDto.otp, verifyCodeDto.email);
   }
 
+  @ApiOperation({ summary: 'Silently refresh access token using refresh token cookie' })
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   async refresh(@Req() req: ExpressRequest, @Res() res: Response) {
-    // Only read the dedicated refresh token cookie — never fall back to the
-    // access token cookie (they serve completely different purposes).
     const refreshToken = req.cookies?.refreshToken;
 
     if (!refreshToken) {
@@ -143,7 +153,6 @@ export class AuthController {
     const result = await this.authService.refreshTokens(refreshToken);
 
     if (!result) {
-      // Refresh token expired, revoked, or detected as reused — force login
       const cookieOptions = this.authService.getCookieOptions();
       res.clearCookie('refreshToken', cookieOptions);
       res.clearCookie('accessToken', cookieOptions);
@@ -156,7 +165,6 @@ export class AuthController {
     const cookieOptions = this.authService.getCookieOptions();
     const sessionMs = this.authService.getSessionMs();
 
-    // Rotate both cookies — the new refresh token resets the 30-day window
     res.cookie('refreshToken', newRefreshToken, {
       ...cookieOptions,
       maxAge: sessionMs,
@@ -170,6 +178,8 @@ export class AuthController {
     return res.json({ user });
   }
 
+  @ApiOperation({ summary: 'Set a new password after OTP verification' })
+  @ApiBody({ type: SetNewPasswordDto })
   @Post('set-new-password')
   @HttpCode(HttpStatus.OK)
   async setNewPassword(@Body() newPasswordDto: SetNewPasswordDto) {
@@ -181,6 +191,9 @@ export class AuthController {
     });
   }
 
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Complete user onboarding' })
+  @ApiBody({ type: OnboardingDto })
   @UseGuards(JwtAuthGuard)
   @Patch('onboarding')
   @HttpCode(HttpStatus.OK)
@@ -191,6 +204,9 @@ export class AuthController {
     return this.authService.completeOnboarding(user.id, dto);
   }
 
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Verify NIN (national ID)' })
+  @ApiBody({ type: VerifyNinDto })
   @UseGuards(JwtAuthGuard)
   @Post('verify-nin')
   @HttpCode(HttpStatus.OK)
@@ -198,6 +214,8 @@ export class AuthController {
     return this.authService.verifyNin(dto.nin);
   }
 
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Get the currently authenticated user' })
   @UseGuards(JwtAuthGuard)
   @Get('me')
   @HttpCode(HttpStatus.OK)
@@ -205,6 +223,9 @@ export class AuthController {
     return this.authService.findUserById(user.id);
   }
 
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Update the current user profile' })
+  @ApiBody({ type: UpdateUserProfileDto })
   @UseGuards(JwtAuthGuard)
   @Patch('profile')
   @HttpCode(HttpStatus.OK)
@@ -215,6 +236,9 @@ export class AuthController {
     return this.authService.updateProfile(user.id, dto);
   }
 
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Change password for authenticated user' })
+  @ApiBody({ type: ChangePasswordDto })
   @UseGuards(JwtAuthGuard)
   @Patch('change-password')
   @HttpCode(HttpStatus.OK)
@@ -236,6 +260,7 @@ export class AuthController {
     return `${base}/api/auth/google/callback`;
   }
 
+  @ApiOperation({ summary: 'Initiate Google OAuth flow (redirects to Google)' })
   @Get('google')
   googleOAuthInit(
     @Query('callbackURL') callbackURL: string,
@@ -246,6 +271,7 @@ export class AuthController {
     return res.redirect(url);
   }
 
+  @ApiOperation({ summary: 'Google OAuth callback (internal redirect handler)' })
   @Get('google/callback')
   async googleOAuthCallback(
     @Query('code') code: string,
@@ -274,6 +300,8 @@ export class AuthController {
     }
   }
 
+  @ApiOperation({ summary: 'Exchange Google OAuth code for tokens (used by Next.js SSR)' })
+  @ApiBody({ schema: { type: 'object', required: ['code', 'redirectUri'], properties: { code: { type: 'string' }, redirectUri: { type: 'string' } } } })
   @Post('google/exchange')
   @HttpCode(HttpStatus.OK)
   async googleExchange(@Body() body: { code: string; redirectUri: string }) {
@@ -284,9 +312,6 @@ export class AuthController {
     const { access_token, refresh_token, user } =
       await this.authService.googleExchange(body.code, body.redirectUri);
 
-    // Return tokens in the body — the Next.js callback route sets the cookies
-    // directly on the browser response using response.cookies.set(), which is
-    // more reliable than forwarding Set-Cookie headers across a server fetch.
     return { user, access_token, refresh_token };
   }
 }

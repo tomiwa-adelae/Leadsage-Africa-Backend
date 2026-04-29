@@ -9,6 +9,7 @@ import { AppModule } from './app.module';
 import { ValidationPipe } from '@nestjs/common';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { json, urlencoded } from 'express';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { rawBody: true });
@@ -22,11 +23,16 @@ async function bootstrap() {
     .map((o) => o.trim())
     .filter(Boolean);
 
+  const port = process.env.PORT || 8000;
+  const isDev = process.env.NODE_ENV !== 'production';
+
   app.enableCors({
     origin: (origin, callback) => {
       // Allow server-to-server / SSR requests (no origin header)
       if (!origin) return callback(null, true);
       if (allowedOrigins.includes(origin)) return callback(null, true);
+      // Allow Swagger UI (same host as the API) in non-production
+      if (isDev && origin === `http://localhost:${port}`) return callback(null, true);
       callback(new Error(`CORS: origin ${origin} is not allowed`));
     },
     credentials: true,
@@ -46,6 +52,22 @@ async function bootstrap() {
       },
     }),
   );
+
+  // Swagger — only in non-production environments
+  if (process.env.NODE_ENV !== 'production') {
+    const config = new DocumentBuilder()
+      .setTitle('Leadsage API')
+      .setDescription('Leadsage backend REST API')
+      .setVersion('1.0')
+      .addBearerAuth()
+      .addCookieAuth('access_token')
+      .build();
+
+    const document = SwaggerModule.createDocument(app, config);
+    SwaggerModule.setup('api/docs', app, document, {
+      swaggerOptions: { persistAuthorization: true },
+    });
+  }
 
   // await app.listen(process.env.PORT ?? 8000);
   await app.listen(process.env.PORT || 8000, '0.0.0.0');

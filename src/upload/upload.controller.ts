@@ -7,6 +7,7 @@ import {
   BadRequestException,
   UseGuards,
 } from '@nestjs/common';
+import { ApiTags, ApiBearerAuth, ApiOperation, ApiConsumes } from '@nestjs/swagger';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { UploadService } from './upload.service';
 import { JwtAuthGuard } from 'src/auth/guards/jwt-auth.guard';
@@ -18,11 +19,15 @@ const ALLOWED_IMAGE_TYPES = [
   'image/webp',
 ];
 
+@ApiTags('upload')
+@ApiBearerAuth()
 @Controller('upload')
 @UseGuards(JwtAuthGuard)
 export class UploadController {
   constructor(private readonly uploadService: UploadService) {}
 
+  @ApiOperation({ summary: 'Upload a profile picture (max 5 MB)' })
+  @ApiConsumes('multipart/form-data')
   @Post('profile/:userId')
   @UseInterceptors(
     FileInterceptor('file', { limits: { fileSize: 5 * 1024 * 1024 } }),
@@ -39,6 +44,8 @@ export class UploadController {
     return this.uploadService.uploadProfilePicture(userId, file);
   }
 
+  @ApiOperation({ summary: 'Upload an event cover image (max 10 MB)' })
+  @ApiConsumes('multipart/form-data')
   @Post('event-cover')
   @UseInterceptors(
     FileInterceptor('file', { limits: { fileSize: 10 * 1024 * 1024 } }),
@@ -53,6 +60,8 @@ export class UploadController {
     return { url };
   }
 
+  @ApiOperation({ summary: 'Upload a blog cover image (max 10 MB)' })
+  @ApiConsumes('multipart/form-data')
   @Post('blog-cover')
   @UseInterceptors(
     FileInterceptor('file', { limits: { fileSize: 10 * 1024 * 1024 } }),
@@ -67,6 +76,8 @@ export class UploadController {
     return { url };
   }
 
+  @ApiOperation({ summary: 'Upload an inline editor image' })
+  @ApiConsumes('multipart/form-data')
   @Post('editor-image')
   @UseInterceptors(FileInterceptor('file'))
   async uploadEditorImage(@UploadedFile() file: any) {

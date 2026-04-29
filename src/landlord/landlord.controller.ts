@@ -11,6 +11,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
+import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody } from '@nestjs/swagger';
 import { Request } from 'express';
 import { JwtAuthGuard } from 'src/auth/guards/jwt-auth.guard';
 import { CurrentUser } from 'src/decorators/current-user.decorator';
@@ -19,6 +20,8 @@ import { RespondBookingDto } from './dto/respond-booking.dto';
 import { RespondApplicationDto } from './dto/respond-application.dto';
 import { UpdateCheckInInstructionsDto } from './dto/update-check-in-instructions.dto';
 
+@ApiTags('landlord')
+@ApiBearerAuth()
 @UseGuards(JwtAuthGuard)
 @Controller('landlord')
 export class LandlordController {
@@ -26,6 +29,7 @@ export class LandlordController {
 
   // ── Bookings ───────────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Get landlord bookings' })
   @Get('bookings')
   getBookings(
     @CurrentUser() user: { id: string },
@@ -34,6 +38,7 @@ export class LandlordController {
     return this.landlordService.getBookings(user.id, status);
   }
 
+  @ApiOperation({ summary: 'Get a booking by ID' })
   @Get('bookings/:id')
   getBooking(
     @CurrentUser() user: { id: string },
@@ -42,6 +47,8 @@ export class LandlordController {
     return this.landlordService.getBookingById(user.id, id);
   }
 
+  @ApiOperation({ summary: 'Confirm a booking' })
+  @ApiBody({ type: RespondBookingDto })
   @Patch('bookings/:id/confirm')
   @HttpCode(HttpStatus.OK)
   confirmBooking(
@@ -52,6 +59,8 @@ export class LandlordController {
     return this.landlordService.confirmBooking(user.id, id, dto);
   }
 
+  @ApiOperation({ summary: 'Reject a booking' })
+  @ApiBody({ type: RespondBookingDto })
   @Patch('bookings/:id/reject')
   @HttpCode(HttpStatus.OK)
   rejectBooking(
@@ -62,6 +71,7 @@ export class LandlordController {
     return this.landlordService.rejectBooking(user.id, id, dto);
   }
 
+  @ApiOperation({ summary: 'Mark a booking as completed' })
   @Patch('bookings/:id/complete')
   @HttpCode(HttpStatus.OK)
   completeBooking(
@@ -71,6 +81,8 @@ export class LandlordController {
     return this.landlordService.completeBooking(user.id, id);
   }
 
+  @ApiOperation({ summary: 'Update check-in instructions for a booking' })
+  @ApiBody({ type: UpdateCheckInInstructionsDto })
   @Patch('bookings/:id/instructions')
   @HttpCode(HttpStatus.OK)
   updateCheckInInstructions(
@@ -81,6 +93,7 @@ export class LandlordController {
     return this.landlordService.updateCheckInInstructions(user.id, id, dto);
   }
 
+  @ApiOperation({ summary: 'Resend check-in instructions to guest' })
   @Post('bookings/:id/instructions/resend')
   @HttpCode(HttpStatus.OK)
   resendCheckInInstructions(
@@ -92,6 +105,7 @@ export class LandlordController {
 
   // ── Applications ───────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Get rental applications for this landlord' })
   @Get('applications')
   getApplications(
     @CurrentUser() user: { id: string },
@@ -100,6 +114,8 @@ export class LandlordController {
     return this.landlordService.getApplications(user.id, status);
   }
 
+  @ApiOperation({ summary: 'Approve a rental application' })
+  @ApiBody({ type: RespondApplicationDto })
   @Patch('applications/:id/approve')
   @HttpCode(HttpStatus.OK)
   approveApplication(
@@ -110,6 +126,8 @@ export class LandlordController {
     return this.landlordService.approveApplication(user.id, id, dto);
   }
 
+  @ApiOperation({ summary: 'Reject a rental application' })
+  @ApiBody({ type: RespondApplicationDto })
   @Patch('applications/:id/reject')
   @HttpCode(HttpStatus.OK)
   rejectApplication(
@@ -120,6 +138,7 @@ export class LandlordController {
     return this.landlordService.rejectApplication(user.id, id, dto);
   }
 
+  @ApiOperation({ summary: 'Mark an application as under review' })
   @Patch('applications/:id/review')
   @HttpCode(HttpStatus.OK)
   markUnderReview(
@@ -131,6 +150,7 @@ export class LandlordController {
 
   // ── Earnings ───────────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Get landlord earnings summary' })
   @Get('earnings')
   getEarnings(@CurrentUser() user: { id: string }) {
     return this.landlordService.getEarnings(user.id);
@@ -138,6 +158,7 @@ export class LandlordController {
 
   // ── Listing detail ────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Get a single listing owned by this landlord' })
   @Get('listings/:id')
   getListing(
     @CurrentUser() user: { id: string },
@@ -148,6 +169,7 @@ export class LandlordController {
 
   // ── Instant Book toggle ────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Toggle instant book on a listing' })
   @Patch('listings/:id/instant-book')
   @HttpCode(HttpStatus.OK)
   toggleInstantBook(
@@ -159,6 +181,7 @@ export class LandlordController {
 
   // ── Tours ──────────────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Get tour requests for this landlord' })
   @Get('tours')
   getTours(
     @CurrentUser() user: { id: string },
@@ -169,11 +192,13 @@ export class LandlordController {
 
   // ── Agreements ─────────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Get rental agreements for this landlord' })
   @Get('agreements')
   getLandlordAgreements(@CurrentUser() user: { id: string }) {
     return this.landlordService.getLandlordAgreements(user.id);
   }
 
+  @ApiOperation({ summary: 'Get a rental agreement by ID' })
   @Get('agreements/:id')
   getLandlordAgreementById(
     @CurrentUser() user: { id: string },
@@ -182,6 +207,8 @@ export class LandlordController {
     return this.landlordService.getLandlordAgreementById(user.id, id);
   }
 
+  @ApiOperation({ summary: 'Sign a rental agreement as landlord' })
+  @ApiBody({ schema: { type: 'object', required: ['signature'], properties: { signature: { type: 'string', description: 'Base64 signature image or full name' } } } })
   @Post('agreements/:id/sign')
   @HttpCode(HttpStatus.OK)
   signAgreementAsLandlord(
@@ -196,6 +223,7 @@ export class LandlordController {
 
   // ── Listing availability ────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Mark a listing as available again' })
   @Patch('listings/:id/mark-available')
   @HttpCode(HttpStatus.OK)
   markListingAvailable(
@@ -207,6 +235,7 @@ export class LandlordController {
 
   // ── Dashboard ──────────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Get landlord dashboard summary' })
   @Get('dashboard')
   getDashboard(@CurrentUser() user: { id: string }) {
     return this.landlordService.getDashboard(user.id);

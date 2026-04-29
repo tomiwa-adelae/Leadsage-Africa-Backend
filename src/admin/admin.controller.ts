@@ -12,6 +12,7 @@ import {
   Res,
   UseGuards,
 } from '@nestjs/common';
+import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery, ApiBody } from '@nestjs/swagger';
 import { Response } from 'express';
 import { JwtAuthGuard } from 'src/auth/guards/jwt-auth.guard';
 import { PositionGuard } from 'src/auth/guards/position.guard';
@@ -29,6 +30,8 @@ import { ScheduleTourDto } from './dto/schedule-tour.dto';
 import { GenerateAgreementDto } from './dto/generate-agreement.dto';
 import { CreateRentalPaymentDto } from './dto/create-rental-payment.dto';
 
+@ApiTags('admin')
+@ApiBearerAuth()
 @UseGuards(JwtAuthGuard, AdminGuard)
 @Controller('admin')
 export class AdminController {
@@ -36,6 +39,7 @@ export class AdminController {
 
   // ── Dashboard ──────────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Get dashboard stats' })
   @Get('stats')
   getStats() {
     return this.adminService.getStats();
@@ -43,22 +47,27 @@ export class AdminController {
 
   // ── Listings ───────────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Get all listings (paginated, filterable)' })
   @Get('listings')
   getAllListings(@Query() query: GetListingsQueryDto) {
     return this.adminService.getAllListings(query);
   }
 
+  @ApiOperation({ summary: 'Get a listing by slug' })
   @Get('listings/:slug')
   findListing(@Param('slug') slug: string) {
     return this.adminService.findListingBySlug(slug);
   }
 
+  @ApiOperation({ summary: 'Approve a listing' })
   @Patch('listings/:id/approve')
   @HttpCode(HttpStatus.OK)
   approveListing(@Param('id') id: string) {
     return this.adminService.approveListing(id);
   }
 
+  @ApiOperation({ summary: 'Reject a listing with a reason' })
+  @ApiBody({ type: RejectListingDto })
   @Patch('listings/:id/reject')
   @HttpCode(HttpStatus.OK)
   rejectListing(@Param('id') id: string, @Body() dto: RejectListingDto) {
@@ -67,11 +76,14 @@ export class AdminController {
 
   // ── Users ──────────────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Get all users (paginated, filterable)' })
   @Get('users')
   getAllUsers(@Query() query: GetUsersQueryDto) {
     return this.adminService.getAllUsers(query);
   }
 
+  @ApiOperation({ summary: 'Update a user account status' })
+  @ApiBody({ type: UpdateUserStatusDto })
   @Patch('users/:id/status')
   @HttpCode(HttpStatus.OK)
   updateUserStatus(
@@ -83,11 +95,14 @@ export class AdminController {
 
   // ── Admin Team ─────────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Get all admin team members' })
   @Get('team')
   getAdminTeam() {
     return this.adminService.getAdminTeam();
   }
 
+  @ApiOperation({ summary: 'Create a new admin account (super admin only)' })
+  @ApiBody({ type: CreateAdminDto })
   @Post('team')
   @HttpCode(HttpStatus.CREATED)
   @UseGuards(PositionGuard)
@@ -96,6 +111,8 @@ export class AdminController {
     return this.adminService.createAdminAccount(dto);
   }
 
+  @ApiOperation({ summary: 'Update an admin account (super admin only)' })
+  @ApiBody({ type: UpdateAdminDto })
   @Patch('team/:id')
   @UseGuards(PositionGuard)
   @RequirePosition('SUPER_ADMIN')
@@ -103,6 +120,7 @@ export class AdminController {
     return this.adminService.updateAdmin(id, dto);
   }
 
+  @ApiOperation({ summary: 'Remove an admin account (super admin only)' })
   @Delete('team/:id')
   @HttpCode(HttpStatus.OK)
   @UseGuards(PositionGuard)
@@ -116,11 +134,13 @@ export class AdminController {
 
   // ── Bookings ───────────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Get booking aggregate stats' })
   @Get('bookings/stats')
   getBookingStats() {
     return this.adminService.getBookingStats();
   }
 
+  @ApiOperation({ summary: 'Get all bookings (filterable)' })
   @Get('bookings')
   getAllBookings(
     @Query() query: {
@@ -134,11 +154,14 @@ export class AdminController {
     return this.adminService.getAllBookings(query);
   }
 
+  @ApiOperation({ summary: 'Get a booking by ID' })
   @Get('bookings/:id')
   getBookingById(@Param('id') id: string) {
     return this.adminService.getBookingById(id);
   }
 
+  @ApiOperation({ summary: 'Cancel a booking' })
+  @ApiBody({ schema: { type: 'object', required: ['reason'], properties: { reason: { type: 'string' } } } })
   @Patch('bookings/:id/cancel')
   @HttpCode(HttpStatus.OK)
   cancelBooking(
@@ -148,12 +171,15 @@ export class AdminController {
     return this.adminService.adminCancelBooking(id, reason);
   }
 
+  @ApiOperation({ summary: 'Mark a booking as completed' })
   @Patch('bookings/:id/complete')
   @HttpCode(HttpStatus.OK)
   completeBooking(@Param('id') id: string) {
     return this.adminService.adminCompleteBooking(id);
   }
 
+  @ApiOperation({ summary: 'Initiate a refund for a booking' })
+  @ApiBody({ schema: { type: 'object', properties: { amount: { type: 'number', description: 'Partial amount; omit for full refund' } } } })
   @Post('bookings/:id/refund')
   @HttpCode(HttpStatus.OK)
   refundBooking(
@@ -163,6 +189,8 @@ export class AdminController {
     return this.adminService.adminInitiateRefund(id, amount);
   }
 
+  @ApiOperation({ summary: 'Add an internal admin note to a booking' })
+  @ApiBody({ schema: { type: 'object', required: ['note'], properties: { note: { type: 'string' } } } })
   @Patch('bookings/:id/note')
   @HttpCode(HttpStatus.OK)
   addAdminNote(
@@ -174,28 +202,36 @@ export class AdminController {
 
   // ── Tour Requests ──────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Get all tour requests' })
+  @ApiQuery({ name: 'status', required: false })
   @Get('tours')
   getTourRequests(@Query('status') status?: string) {
     return this.adminService.getTourRequests(status);
   }
 
+  @ApiOperation({ summary: 'Get a tour request by ID' })
   @Get('tours/:id')
   getTourRequestById(@Param('id') id: string) {
     return this.adminService.getTourRequestById(id);
   }
 
+  @ApiOperation({ summary: 'Schedule a tour' })
+  @ApiBody({ type: ScheduleTourDto })
   @Patch('tours/:id/schedule')
   @HttpCode(HttpStatus.OK)
   scheduleTour(@Param('id') id: string, @Body() dto: ScheduleTourDto) {
     return this.adminService.scheduleTour(id, dto);
   }
 
+  @ApiOperation({ summary: 'Mark a tour as completed' })
   @Patch('tours/:id/complete')
   @HttpCode(HttpStatus.OK)
   completeTour(@Param('id') id: string) {
     return this.adminService.completeTour(id);
   }
 
+  @ApiOperation({ summary: 'Cancel a tour' })
+  @ApiBody({ schema: { type: 'object', properties: { reason: { type: 'string' } } } })
   @Patch('tours/:id/cancel')
   @HttpCode(HttpStatus.OK)
   cancelTour(@Param('id') id: string, @Body('reason') reason?: string) {
@@ -204,16 +240,21 @@ export class AdminController {
 
   // ── Screening Applications ─────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Get all screening applications' })
+  @ApiQuery({ name: 'status', required: false })
   @Get('screening-applications')
   getScreeningApplications(@Query('status') status?: string) {
     return this.adminService.getScreeningApplications(status);
   }
 
+  @ApiOperation({ summary: 'Get a screening application by ID' })
   @Get('screening-applications/:id')
   getScreeningApplicationById(@Param('id') id: string) {
     return this.adminService.getScreeningApplicationById(id);
   }
 
+  @ApiOperation({ summary: 'Approve or reject a screening application' })
+  @ApiBody({ schema: { type: 'object', required: ['status'], properties: { status: { type: 'string', enum: ['APPROVED', 'REJECTED'] }, note: { type: 'string' } } } })
   @Patch('screening-applications/:id/review')
   @HttpCode(HttpStatus.OK)
   reviewApplication(
@@ -224,6 +265,7 @@ export class AdminController {
     return this.adminService.adminReviewApplication(id, status, note);
   }
 
+  @ApiOperation({ summary: 'Verify applicant NIN' })
   @Post('screening-applications/:id/verify-nin')
   @HttpCode(HttpStatus.OK)
   verifyApplicantNin(@Param('id') id: string) {
@@ -232,17 +274,22 @@ export class AdminController {
 
   // ── Rental Agreements ──────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Generate a rental agreement' })
+  @ApiBody({ type: GenerateAgreementDto })
   @Post('agreements')
   @HttpCode(HttpStatus.CREATED)
   generateAgreement(@Body() dto: GenerateAgreementDto) {
     return this.adminService.generateAgreement(dto);
   }
 
+  @ApiOperation({ summary: 'Get all rental agreements' })
+  @ApiQuery({ name: 'status', required: false })
   @Get('agreements')
   getAgreements(@Query('status') status?: string) {
     return this.adminService.getAgreements(status);
   }
 
+  @ApiOperation({ summary: 'Get a rental agreement by ID' })
   @Get('agreements/:id')
   getAgreementById(@Param('id') id: string) {
     return this.adminService.getAgreementById(id);
@@ -250,18 +297,22 @@ export class AdminController {
 
   // ── Rental Payments ────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Create rental payment schedule' })
+  @ApiBody({ type: CreateRentalPaymentDto })
   @Post('rental-payments')
   @HttpCode(HttpStatus.CREATED)
   createRentalPayments(@Body() dto: CreateRentalPaymentDto) {
     return this.adminService.createRentalPayments(dto);
   }
 
+  @ApiOperation({ summary: 'Mark a rental payment as paid' })
   @Patch('rental-payments/:id/paid')
   @HttpCode(HttpStatus.OK)
   markRentalPaymentPaid(@Param('id') id: string) {
     return this.adminService.markRentalPaymentPaid(id);
   }
 
+  @ApiOperation({ summary: 'Mark a rental payment as overdue' })
   @Patch('rental-payments/:id/overdue')
   @HttpCode(HttpStatus.OK)
   markRentalPaymentOverdue(@Param('id') id: string) {
@@ -270,6 +321,7 @@ export class AdminController {
 
   // ── Savings ────────────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Get all savings plans' })
   @Get('savings')
   getAllSavingsPlans(
     @Query('status') status?: string,
@@ -280,11 +332,13 @@ export class AdminController {
     return this.adminService.getAllSavingsPlans({ status, page: +page, limit: +limit, search });
   }
 
+  @ApiOperation({ summary: 'Get savings aggregate stats' })
   @Get('savings/stats')
   getSavingsStats() {
     return this.adminService.getSavingsStats();
   }
 
+  @ApiOperation({ summary: 'Get a savings plan by ID' })
   @Get('savings/:id')
   getSavingsPlanById(@Param('id') id: string) {
     return this.adminService.getSavingsPlanById(id);
@@ -292,6 +346,7 @@ export class AdminController {
 
   // ── Escrow utilities ────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Release all overdue escrows' })
   @Post('escrows/release-overdue')
   @HttpCode(HttpStatus.OK)
   releaseOverdueEscrows() {
@@ -300,6 +355,7 @@ export class AdminController {
 
   // ── Ledger ─────────────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Get paginated ledger entries' })
   @Get('ledger/entries')
   getLedgerEntries(
     @Query('userId') userId?: string,
@@ -325,6 +381,7 @@ export class AdminController {
     });
   }
 
+  @ApiOperation({ summary: 'Get ledger aggregate stats' })
   @Get('ledger/stats')
   getLedgerStats() {
     return this.adminService.getLedgerStats();
@@ -332,6 +389,7 @@ export class AdminController {
 
   // ── Withdrawal requests ─────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Get all withdrawal requests' })
   @Get('withdrawals')
   getWithdrawalRequests(
     @Query('status') status?: string,
@@ -347,11 +405,13 @@ export class AdminController {
     });
   }
 
+  @ApiOperation({ summary: 'Get withdrawal aggregate stats' })
   @Get('withdrawals/stats')
   getWithdrawalStats() {
     return this.adminService.getWithdrawalStats();
   }
 
+  @ApiOperation({ summary: 'Process a withdrawal via Anchor' })
   @Post('withdrawals/:id/process')
   @HttpCode(HttpStatus.OK)
   processWithdrawal(
@@ -361,6 +421,7 @@ export class AdminController {
     return this.adminService.processWithdrawalViaAnchor(id, admin.id);
   }
 
+  @ApiOperation({ summary: 'Mark a withdrawal as done (manual)' })
   @Post('withdrawals/:id/mark-done')
   @HttpCode(HttpStatus.OK)
   markWithdrawalDone(
@@ -370,6 +431,8 @@ export class AdminController {
     return this.adminService.markWithdrawalDone(id, admin.id);
   }
 
+  @ApiOperation({ summary: 'Reject a withdrawal request' })
+  @ApiBody({ schema: { type: 'object', required: ['reason'], properties: { reason: { type: 'string' } } } })
   @Post('withdrawals/:id/reject')
   @HttpCode(HttpStatus.OK)
   rejectWithdrawal(
@@ -380,6 +443,8 @@ export class AdminController {
     return this.adminService.rejectWithdrawal(id, admin.id, reason);
   }
 
+  @ApiOperation({ summary: "Override a user's saved bank account" })
+  @ApiBody({ schema: { type: 'object', required: ['accountNumber', 'bankCode', 'bankName'], properties: { accountNumber: { type: 'string', example: '0123456789' }, bankCode: { type: 'string', example: '058' }, bankName: { type: 'string', example: 'GTBank' } } } })
   @Post('users/:userId/bank-account/override')
   @HttpCode(HttpStatus.OK)
   overrideBankAccount(
@@ -394,6 +459,7 @@ export class AdminController {
     );
   }
 
+  @ApiOperation({ summary: 'Export ledger entries as CSV' })
   @Get('ledger/export')
   async exportLedger(
     @Res() res: Response,

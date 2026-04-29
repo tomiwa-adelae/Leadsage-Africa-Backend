@@ -1,12 +1,19 @@
 import { Controller, Get, Query, Req, UseGuards } from '@nestjs/common';
+import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { LedgerService, LedgerAccountType } from './ledger.service';
 import { JwtAuthGuard } from 'src/auth/guards/jwt-auth.guard';
 
+@ApiTags('ledger')
+@ApiBearerAuth()
 @Controller('ledger')
 @UseGuards(JwtAuthGuard)
 export class LedgerController {
   constructor(private readonly ledger: LedgerService) {}
 
+  @ApiOperation({ summary: 'Get paginated ledger entries for the current user' })
+  @ApiQuery({ name: 'accountType', required: false })
+  @ApiQuery({ name: 'limit', required: false })
+  @ApiQuery({ name: 'offset', required: false })
   @Get('entries')
   async getEntries(
     @Req() req: any,
@@ -24,6 +31,8 @@ export class LedgerController {
     return { entries, total };
   }
 
+  @ApiOperation({ summary: 'Get ledger balance for an account type' })
+  @ApiQuery({ name: 'accountType', required: false, example: 'WALLET' })
   @Get('balance')
   async getBalance(
     @Req() req: any,
