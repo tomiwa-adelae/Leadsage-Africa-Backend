@@ -15,6 +15,7 @@ model User {
   id            String  @id @default(uuid())
   firstName     String?
   lastName      String?
+  middleName    String?
   username      String? @unique
   email         String  @unique
   emailVerified Boolean @default(false)
@@ -84,9 +85,10 @@ model User {
   wallet            WalletAccount?
   walletTxs         WalletTransaction[]
   escrowsAsLandlord PaymentEscrow[]     @relation("EscrowLandlord")
-  firstKeySavings   FirstKeySavings[]
-  posts             Post[]              @relation("AuthoredPosts")
-  ledgerEntries     LedgerEntry[]
+  firstKeySavings     FirstKeySavings[]
+  posts               Post[]              @relation("AuthoredPosts")
+  ledgerEntries       LedgerEntry[]
+  withdrawalRequests  WithdrawalRequest[]
 }
 
 enum AdminPosition {
@@ -531,6 +533,14 @@ model WalletAccount {
   transactionPin    String?
   transactionPinSet Boolean @default(false)
 
+  // Verified withdrawal account (one per user)
+  withdrawalAccountNumber   String?
+  withdrawalBankCode        String?
+  withdrawalBankName        String?
+  withdrawalAccountName     String? // as returned by Anchor name enquiry
+  withdrawalAccountVerifiedAt DateTime?
+  withdrawalAccountChangedAt  DateTime? // for 30-day cooldown
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -733,6 +743,44 @@ enum SavingsTxType {
   WITHDRAWAL
   PENALTY
   REFUND
+}
+
+// ── Withdrawal Requests ────────────────────────────────────────────────────────
+
+model WithdrawalRequest {
+  id     String @id @default(uuid())
+  userId String
+
+  amount    Float // requested amount
+  fee       Float @default(50) // NIP fee (₦50), borne by user
+  netAmount Float // amount - fee = what user receives
+
+  // Bank account snapshot at request time
+  bankAccountNumber String
+  bankCode          String
+  bankName          String
+  accountName       String
+
+  status    WithdrawalStatus @default(PENDING)
+  adminNote String? // rejection reason shown to user
+
+  // Processing metadata
+  processedBy       String? // admin userId
+  processedAt       DateTime?
+  processedManually Boolean  @default(false) // true = "mark as done" path
+  anchorTransferRef String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+enum WithdrawalStatus {
+  PENDING
+  COMPLETED
+  REJECTED
+  CANCELLED
 }
 
 // ── Ledger ─────────────────────────────────────────────────────────────────────

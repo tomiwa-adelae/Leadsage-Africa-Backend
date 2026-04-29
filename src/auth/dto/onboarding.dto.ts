@@ -11,6 +11,10 @@ export class OnboardingDto {
   // ── Personal info ────────────────────────────────────────────────────────
   @IsOptional()
   @IsString()
+  middleName?: string;
+
+  @IsOptional()
+  @IsString()
   gender?: string;
 
   @IsOptional()

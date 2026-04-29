@@ -34,8 +34,13 @@ export class WalletController {
   getTransactions(
     @CurrentUser() user: { id: string },
     @Query('limit') limit?: string,
+    @Query('page') page?: string,
   ) {
-    return this.walletService.getTransactions(user.id, limit ? parseInt(limit) : 30);
+    return this.walletService.getTransactions(
+      user.id,
+      limit ? parseInt(limit) : 30,
+      page ? parseInt(page) : 1,
+    );
   }
 
   // ── KYC ───────────────────────────────────────────────────────────────────
@@ -133,7 +138,12 @@ export class WalletController {
     return this.walletService.payBookingFromWallet(user.id, bookingId, body.pin);
   }
 
-  // ── Withdrawal ─────────────────────────────────────────────────────────────
+  // ── Bank account ──────────────────────────────────────────────────────────
+
+  @Get('bank-account')
+  getBankAccount(@CurrentUser() user: { id: string }) {
+    return this.walletService.getBankAccount(user.id);
+  }
 
   @Post('verify-bank')
   @HttpCode(HttpStatus.OK)
@@ -141,26 +151,43 @@ export class WalletController {
     return this.walletService.verifyBankAccount(body.accountNumber, body.bankCode);
   }
 
-  @Post('withdraw')
+  @Post('bank-account')
   @HttpCode(HttpStatus.OK)
-  withdraw(
+  saveBankAccount(
     @CurrentUser() user: { id: string },
-    @Body()
-    body: {
-      amount: number;
-      bankAccountNumber: string;
-      bankCode: string;
-      bankAccountName: string;
-      pin: string;
-    },
+    @Body() body: { accountNumber: string; bankCode: string; bankName: string; pin: string },
   ) {
-    return this.walletService.requestWithdrawal(
+    return this.walletService.saveBankAccount(
       user.id,
-      body.amount,
-      body.bankAccountNumber,
+      body.accountNumber,
       body.bankCode,
-      body.bankAccountName,
+      body.bankName,
       body.pin,
     );
+  }
+
+  // ── Withdrawal requests ────────────────────────────────────────────────────
+
+  @Get('withdraw/requests')
+  getWithdrawalRequests(@CurrentUser() user: { id: string }) {
+    return this.walletService.getWithdrawalRequests(user.id);
+  }
+
+  @Post('withdraw/request')
+  @HttpCode(HttpStatus.OK)
+  requestWithdrawal(
+    @CurrentUser() user: { id: string },
+    @Body() body: { amount: number; pin: string },
+  ) {
+    return this.walletService.requestWithdrawal(user.id, body.amount, body.pin);
+  }
+
+  @Post('withdraw/:id/cancel')
+  @HttpCode(HttpStatus.OK)
+  cancelWithdrawal(
+    @CurrentUser() user: { id: string },
+    @Param('id') id: string,
+  ) {
+    return this.walletService.cancelWithdrawal(user.id, id);
   }
 }

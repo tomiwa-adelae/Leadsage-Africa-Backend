@@ -344,22 +344,44 @@ export class AnchorService {
 
   // ── Transfers ───────────────────────────────────────────────────────────────
 
+  /**
+   * Initiate a NIP (bank) transfer from a Leadsage Anchor account to an
+   * external Nigerian bank account. Beneficiary details are sent inline —
+   * Anchor live does not support pre-creating counterparties via POST.
+   */
+  async nipTransfer(params: {
+    accountId: string;
+    bankCode: string;
+    accountNumber: string;
+    accountName: string;
+    amountNaira: number;
+    reference: string;
+    reason: string;
+  }) {
+    // Anchor NIP transfer uses a flat (non-JSON:API) body.
+    // Inline counterParty bank details — no pre-created counterparty ID needed.
+    return this.request<any>('POST', '/api/v1/transfers', {
+      amount: Math.round(params.amountNaira * 100),
+      currency: 'NGN',
+      reference: params.reference,
+      reason: params.reason.slice(0, 100),
+      account: { id: params.accountId },
+      counterParty: {
+        bankCode: params.bankCode,
+        accountNumber: params.accountNumber,
+        accountName: params.accountName,
+      },
+    });
+  }
+
+  // Keep for backward compat — delegates to nipTransfer
   async createCounterparty(params: {
     bankCode: string;
     accountNumber: string;
     accountName: string;
   }) {
-    const data = await this.request<any>('POST', '/api/v1/counterparties', {
-      data: {
-        type: 'Counterparty',
-        attributes: {
-          bankCode: params.bankCode,
-          accountNumber: params.accountNumber,
-          accountName: params.accountName,
-        },
-      },
-    });
-    return data?.data?.id as string;
+    // No-op on live — beneficiary sent inline in nipTransfer
+    return `inline:${params.bankCode}:${params.accountNumber}`;
   }
 
   async initiateTransfer(params: {
@@ -369,13 +391,18 @@ export class AnchorService {
     reference: string;
     reason: string;
   }) {
-    return this.request<any>('POST', '/api/v1/transfers', {
-      amount: Math.round(params.amountNaira * 100),
-      currency: 'NGN',
-      reason: params.reason.slice(0, 100),
+    // Legacy path — only used by old withdrawal code path; new code uses nipTransfer directly
+    const [, bankCode, accountNumber] = params.counterpartyId.startsWith('inline:')
+      ? params.counterpartyId.split(':')
+      : [null, '', ''];
+    return this.nipTransfer({
+      accountId: params.accountId,
+      bankCode,
+      accountNumber,
+      accountName: 'Recipient',
+      amountNaira: params.amountNaira,
       reference: params.reference,
-      account: { id: params.accountId },
-      counterParty: { id: params.counterpartyId },
+      reason: params.reason,
     });
   }
 

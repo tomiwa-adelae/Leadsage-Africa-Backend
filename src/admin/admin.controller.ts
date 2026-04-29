@@ -330,6 +330,70 @@ export class AdminController {
     return this.adminService.getLedgerStats();
   }
 
+  // ── Withdrawal requests ─────────────────────────────────────────────────────
+
+  @Get('withdrawals')
+  getWithdrawalRequests(
+    @Query('status') status?: string,
+    @Query('search') search?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.adminService.getWithdrawalRequests({
+      status,
+      search,
+      page: page ? parseInt(page, 10) : 1,
+      limit: limit ? parseInt(limit, 10) : 30,
+    });
+  }
+
+  @Get('withdrawals/stats')
+  getWithdrawalStats() {
+    return this.adminService.getWithdrawalStats();
+  }
+
+  @Post('withdrawals/:id/process')
+  @HttpCode(HttpStatus.OK)
+  processWithdrawal(
+    @Param('id') id: string,
+    @CurrentUser() admin: { id: string },
+  ) {
+    return this.adminService.processWithdrawalViaAnchor(id, admin.id);
+  }
+
+  @Post('withdrawals/:id/mark-done')
+  @HttpCode(HttpStatus.OK)
+  markWithdrawalDone(
+    @Param('id') id: string,
+    @CurrentUser() admin: { id: string },
+  ) {
+    return this.adminService.markWithdrawalDone(id, admin.id);
+  }
+
+  @Post('withdrawals/:id/reject')
+  @HttpCode(HttpStatus.OK)
+  rejectWithdrawal(
+    @Param('id') id: string,
+    @CurrentUser() admin: { id: string },
+    @Body('reason') reason: string,
+  ) {
+    return this.adminService.rejectWithdrawal(id, admin.id, reason);
+  }
+
+  @Post('users/:userId/bank-account/override')
+  @HttpCode(HttpStatus.OK)
+  overrideBankAccount(
+    @Param('userId') userId: string,
+    @Body() body: { accountNumber: string; bankCode: string; bankName: string },
+  ) {
+    return this.adminService.adminOverrideBankAccount(
+      userId,
+      body.accountNumber,
+      body.bankCode,
+      body.bankName,
+    );
+  }
+
   @Get('ledger/export')
   async exportLedger(
     @Res() res: Response,

@@ -4,8 +4,10 @@ import {
   ForbiddenException,
   Injectable,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import * as bcrypt from 'bcryptjs';
 import slugify from 'slugify';
 import { AdminPosition, ListingStatus } from '@prisma/client';
@@ -43,6 +45,8 @@ function groupByMonth(records: { createdAt: Date }[]) {
 
 @Injectable()
 export class AdminService {
+  private readonly logger = new Logger(AdminService.name);
+
   constructor(
     private prisma: PrismaService,
     private mail: MailService,
@@ -1413,6 +1417,231 @@ export class AdminService {
     }
 
     return { backfilled, released };
+  }
+
+  // ── Withdrawal requests ─────────────────────────────────────────────────────
+
+  async getWithdrawalRequests(query: {
+    status?: string;
+    search?: string;
+    page?: number;
+    limit?: number;
+  }) {
+    const page = query.page ?? 1;
+    const limit = Math.min(query.limit ?? 30, 100);
+    const skip = (page - 1) * limit;
+
+    let userIds: string[] | undefined;
+    if (query.search) {
+      const matched = await this.prisma.user.findMany({
+        where: {
+          OR: [
+            { firstName: { contains: query.search, mode: 'insensitive' } },
+            { lastName: { contains: query.search, mode: 'insensitive' } },
+            { email: { contains: query.search, mode: 'insensitive' } },
+          ],
+        },
+        select: { id: true },
+      });
+      userIds = matched.map((u) => u.id);
+      if (userIds.length === 0) return { requests: [], total: 0, page, limit };
+    }
+
+    const where: any = {
+      ...(query.status && query.status !== 'ALL' ? { status: query.status } : {}),
+      ...(userIds ? { userId: { in: userIds } } : {}),
+    };
+
+    const [requests, total] = await Promise.all([
+      this.prisma.withdrawalRequest.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+        skip,
+        include: {
+          user: {
+            select: {
+              id: true, firstName: true, lastName: true, email: true, image: true,
+              wallet: { select: { availableBalance: true, anchorAccountId: true } },
+            },
+          },
+        },
+      }),
+      this.prisma.withdrawalRequest.count({ where }),
+    ]);
+
+    return { requests, total, page, limit };
+  }
+
+  async getWithdrawalStats() {
+    const [pending, completed, rejected, cancelled, totalAmountPending] = await Promise.all([
+      this.prisma.withdrawalRequest.count({ where: { status: 'PENDING' } }),
+      this.prisma.withdrawalRequest.count({ where: { status: 'COMPLETED' } }),
+      this.prisma.withdrawalRequest.count({ where: { status: 'REJECTED' } }),
+      this.prisma.withdrawalRequest.count({ where: { status: 'CANCELLED' } }),
+      this.prisma.withdrawalRequest.aggregate({
+        where: { status: 'PENDING' },
+        _sum: { amount: true },
+      }),
+    ]);
+
+    return {
+      pending,
+      completed,
+      rejected,
+      cancelled,
+      totalAmountPending: totalAmountPending._sum.amount ?? 0,
+    };
+  }
+
+  async processWithdrawalViaAnchor(requestId: string, adminId: string) {
+    const request = await this.prisma.withdrawalRequest.findUnique({
+      where: { id: requestId },
+    });
+    if (!request) throw new NotFoundException('Withdrawal request not found');
+    if (request.status !== 'PENDING') {
+      throw new BadRequestException('This request has already been actioned');
+    }
+
+    const reference = `wdraw-${requestId}-${randomUUID()}`;
+
+    // Debit wallet + fire Anchor NIP transfer
+    await this.wallet.executeWithdrawalTransfer(
+      request.userId,
+      request.amount,
+      request.netAmount,
+      request.bankAccountNumber,
+      request.bankCode,
+      request.accountName,
+      reference,
+    );
+
+    await this.prisma.withdrawalRequest.update({
+      where: { id: requestId },
+      data: {
+        status: 'COMPLETED',
+        processedBy: adminId,
+        processedAt: new Date(),
+        processedManually: false,
+        anchorTransferRef: reference,
+      },
+    });
+
+    // Notify user
+    await this.prisma.notification.create({
+      data: {
+        userId: request.userId,
+        type: 'GENERAL',
+        title: 'Withdrawal processed',
+        body: `Your withdrawal of ₦${request.netAmount.toLocaleString()} to ${request.accountName} has been sent.`,
+        data: { withdrawalRequestId: requestId },
+      },
+    });
+
+    this.logger.log(`Withdrawal ${requestId} processed via Anchor by admin ${adminId}`);
+    return { message: 'Withdrawal processed and funds sent via Anchor' };
+  }
+
+  async markWithdrawalDone(requestId: string, adminId: string) {
+    const request = await this.prisma.withdrawalRequest.findUnique({
+      where: { id: requestId },
+    });
+    if (!request) throw new NotFoundException('Withdrawal request not found');
+    if (request.status !== 'PENDING') {
+      throw new BadRequestException('This request has already been actioned');
+    }
+
+    // Debit wallet (no Anchor transfer — admin paid manually)
+    await this.wallet.debitWallet(
+      request.userId,
+      request.amount,
+      `Withdrawal to ${request.accountName}`,
+      { type: 'WITHDRAWAL', ledgerEvent: 'WITHDRAWAL', reference: `wdraw-manual-${requestId}` },
+    );
+
+    await this.prisma.withdrawalRequest.update({
+      where: { id: requestId },
+      data: {
+        status: 'COMPLETED',
+        processedBy: adminId,
+        processedAt: new Date(),
+        processedManually: true,
+      },
+    });
+
+    await this.prisma.notification.create({
+      data: {
+        userId: request.userId,
+        type: 'GENERAL',
+        title: 'Withdrawal processed',
+        body: `Your withdrawal of ₦${request.netAmount.toLocaleString()} to ${request.accountName} has been sent.`,
+        data: { withdrawalRequestId: requestId },
+      },
+    });
+
+    this.logger.log(`Withdrawal ${requestId} marked done manually by admin ${adminId}`);
+    return { message: 'Withdrawal marked as done' };
+  }
+
+  async rejectWithdrawal(requestId: string, adminId: string, reason: string) {
+    const request = await this.prisma.withdrawalRequest.findUnique({
+      where: { id: requestId },
+    });
+    if (!request) throw new NotFoundException('Withdrawal request not found');
+    if (request.status !== 'PENDING') {
+      throw new BadRequestException('This request has already been actioned');
+    }
+
+    // No wallet debit — money was never taken
+    await this.prisma.withdrawalRequest.update({
+      where: { id: requestId },
+      data: {
+        status: 'REJECTED',
+        adminNote: reason,
+        processedBy: adminId,
+        processedAt: new Date(),
+      },
+    });
+
+    await this.prisma.notification.create({
+      data: {
+        userId: request.userId,
+        type: 'GENERAL',
+        title: 'Withdrawal request rejected',
+        body: `Your withdrawal of ₦${request.amount.toLocaleString()} was not processed. Reason: ${reason}`,
+        data: { withdrawalRequestId: requestId },
+      },
+    });
+
+    return { message: 'Withdrawal rejected' };
+  }
+
+  async adminOverrideBankAccount(
+    userId: string,
+    accountNumber: string,
+    bankCode: string,
+    bankName: string,
+  ) {
+    const wallet = await this.prisma.walletAccount.findUnique({ where: { userId } });
+    if (!wallet) throw new NotFoundException('Wallet not found');
+
+    // Verify account name via Anchor
+    const verified = await this.wallet.verifyBankAccount(accountNumber, bankCode);
+
+    await this.prisma.walletAccount.update({
+      where: { userId },
+      data: {
+        withdrawalAccountNumber: accountNumber,
+        withdrawalBankCode: bankCode,
+        withdrawalBankName: bankName,
+        withdrawalAccountName: verified.accountName,
+        withdrawalAccountVerifiedAt: new Date(),
+        // Reset cooldown to now so user must wait 30 days again from today
+        withdrawalAccountChangedAt: new Date(),
+      },
+    });
+
+    return { message: 'Bank account updated by admin', accountName: verified.accountName };
   }
 
   // ── Ledger ─────────────────────────────────────────────────────────────────

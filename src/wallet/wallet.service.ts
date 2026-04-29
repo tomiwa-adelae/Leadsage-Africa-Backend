@@ -66,6 +66,7 @@ export class WalletService {
       select: {
         firstName: true,
         lastName: true,
+        middleName: true,
         email: true,
         phoneNumber: true,
       },
@@ -88,6 +89,7 @@ export class WalletService {
       const anchorCustomerId = await this.anchor.createOrFetchCustomer({
         firstName: user.firstName ?? '',
         lastName: user.lastName ?? '',
+        middleName: user.middleName ?? '',
         email: user.email,
         phoneNumber: user.phoneNumber ?? '08000000000',
       });
@@ -248,8 +250,11 @@ export class WalletService {
   // ── Card top-up (Paystack) ─────────────────────────────────────────────────
 
   async initializeCardTopup(userId: string, amountNGN: number) {
-    const wallet = await this.prisma.walletAccount.findUnique({ where: { userId } });
-    if (!wallet?.isActive) throw new BadRequestException('Complete wallet KYC before topping up');
+    const wallet = await this.prisma.walletAccount.findUnique({
+      where: { userId },
+    });
+    if (!wallet?.isActive)
+      throw new BadRequestException('Complete wallet KYC before topping up');
 
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
@@ -310,30 +315,66 @@ export class WalletService {
   // ── Sync balance from Anchor ────────────────────────────────────────────────
 
   async syncFromAnchor(userId: string) {
-    const wallet = await this.prisma.walletAccount.findUnique({ where: { userId } });
+    const wallet = await this.prisma.walletAccount.findUnique({
+      where: { userId },
+    });
     if (!wallet) throw new NotFoundException('Wallet not found');
     if (!wallet.anchorAccountId) {
       return { synced: false, message: 'Wallet not yet activated.' };
     }
 
-    const anchorBalance = await this.anchor.getAccountBalance(wallet.anchorAccountId);
+    let anchorBalance: number;
+    try {
+      anchorBalance = await this.anchor.getAccountBalance(
+        wallet.anchorAccountId,
+      );
+    } catch (e: any) {
+      // Network or DNS failure reaching Anchor — return gracefully so the frontend
+      // polling loop doesn't get a 500 and can retry on its next attempt.
+      const isNetworkError =
+        e?.cause?.code === 'EAI_AGAIN' ||
+        e?.code === 'EAI_AGAIN' ||
+        e?.message?.includes('fetch failed') ||
+        e?.message?.includes('ECONNREFUSED');
+      if (isNetworkError) {
+        this.logger.warn(
+          `Anchor unreachable during wallet sync for user ${userId}: ${e?.cause?.code ?? e?.message}`,
+        );
+        return {
+          synced: false,
+          message: 'Could not reach Anchor — please try again shortly.',
+        };
+      }
+      throw e;
+    }
     const localBalance = wallet.availableBalance;
     const diff = +(anchorBalance - localBalance).toFixed(2);
 
     if (diff <= 0) {
-      return { synced: false, message: 'Balance already up to date.', anchorBalance, localBalance };
+      return {
+        synced: false,
+        message: 'Balance already up to date.',
+        anchorBalance,
+        localBalance,
+      };
     }
 
     // Deterministic reference so concurrent sync calls are de-duped by unique constraint
     const reference = `anchor-sync-wallet-${userId}-bal${Math.round(anchorBalance * 100)}`;
     try {
-      await this.creditWallet(userId, diff, 'Bank transfer (synced from Anchor)', {
-        type: 'CREDIT',
-        reference,
-        ledgerEvent: 'ANCHOR_SYNC_CORRECTION',
-      });
+      await this.creditWallet(
+        userId,
+        diff,
+        'Bank transfer (synced from Anchor)',
+        {
+          type: 'CREDIT',
+          reference,
+          ledgerEvent: 'ANCHOR_SYNC_CORRECTION',
+        },
+      );
     } catch (e: any) {
-      if (e?.code === 'P2002') return { synced: false, message: 'Balance already up to date.' };
+      if (e?.code === 'P2002')
+        return { synced: false, message: 'Balance already up to date.' };
       throw e;
     }
 
@@ -508,12 +549,18 @@ export class WalletService {
     );
   }
 
-  async getTransactions(userId: string, limit = 30) {
-    return this.prisma.walletTransaction.findMany({
-      where: { userId },
-      orderBy: { createdAt: 'desc' },
-      take: limit,
-    });
+  async getTransactions(userId: string, limit = 30, page = 1) {
+    const skip = (page - 1) * limit;
+    const [transactions, total] = await Promise.all([
+      this.prisma.walletTransaction.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+        skip,
+      }),
+      this.prisma.walletTransaction.count({ where: { userId } }),
+    ]);
+    return { transactions, total, page, limit };
   }
 
   // ── Internal ledger helpers ────────────────────────────────────────────────
@@ -567,35 +614,39 @@ export class WalletService {
     // Dual-write to immutable ledger — non-blocking
     const eventType = opts?.ledgerEvent ?? 'BANK_DEPOSIT';
     const debitAccount =
-      eventType === 'ESCROW_RELEASE' || eventType === 'ESCROW_REFUND' ? 'ESCROW'
-      : eventType === 'WITHDRAWAL' ? 'FIRSTKEY_SAVINGS'
-      : 'EXTERNAL';
-    this.ledger.recordPair(
-      {
-        userId,
-        accountType: debitAccount,
-        amount: amountNGN,
-        balanceAfter: 0, // we don't track EXTERNAL/ESCROW balance here
-        eventType,
-        reference: `${ref}-dbt`,
-        description,
-        groupRef: opts?.ledgerGroupRef,
-        paystackRef: opts?.paystackRef,
-        anchorEventId: opts?.anchorEventId,
-      },
-      {
-        userId,
-        accountType: 'WALLET',
-        amount: amountNGN,
-        balanceAfter: newBalance,
-        eventType,
-        reference: `${ref}-crd`,
-        description,
-        groupRef: opts?.ledgerGroupRef,
-        paystackRef: opts?.paystackRef,
-        anchorEventId: opts?.anchorEventId,
-      },
-    ).catch(() => {});
+      eventType === 'ESCROW_RELEASE' || eventType === 'ESCROW_REFUND'
+        ? 'ESCROW'
+        : eventType === 'WITHDRAWAL'
+          ? 'FIRSTKEY_SAVINGS'
+          : 'EXTERNAL';
+    this.ledger
+      .recordPair(
+        {
+          userId,
+          accountType: debitAccount,
+          amount: amountNGN,
+          balanceAfter: 0, // we don't track EXTERNAL/ESCROW balance here
+          eventType,
+          reference: `${ref}-dbt`,
+          description,
+          groupRef: opts?.ledgerGroupRef,
+          paystackRef: opts?.paystackRef,
+          anchorEventId: opts?.anchorEventId,
+        },
+        {
+          userId,
+          accountType: 'WALLET',
+          amount: amountNGN,
+          balanceAfter: newBalance,
+          eventType,
+          reference: `${ref}-crd`,
+          description,
+          groupRef: opts?.ledgerGroupRef,
+          paystackRef: opts?.paystackRef,
+          anchorEventId: opts?.anchorEventId,
+        },
+      )
+      .catch(() => {});
   }
 
   async debitWallet(
@@ -647,31 +698,36 @@ export class WalletService {
     // Dual-write to immutable ledger — non-blocking
     const eventType = opts?.ledgerEvent ?? 'WITHDRAWAL';
     const creditAccount =
-      eventType === 'ESCROW_HOLD' ? 'ESCROW'
-      : eventType === 'WALLET_TO_SAVINGS' || eventType === 'SCHEDULED_CONTRIBUTION_WALLET' ? 'FIRSTKEY_SAVINGS'
-      : 'EXTERNAL';
-    this.ledger.recordPair(
-      {
-        userId,
-        accountType: 'WALLET',
-        amount: amountNGN,
-        balanceAfter: newBalance,
-        eventType,
-        reference: `${ref}-dbt`,
-        description,
-        groupRef: opts?.ledgerGroupRef,
-      },
-      {
-        userId,
-        accountType: creditAccount,
-        amount: amountNGN,
-        balanceAfter: 0,
-        eventType,
-        reference: `${ref}-crd`,
-        description,
-        groupRef: opts?.ledgerGroupRef,
-      },
-    ).catch(() => {});
+      eventType === 'ESCROW_HOLD'
+        ? 'ESCROW'
+        : eventType === 'WALLET_TO_SAVINGS' ||
+            eventType === 'SCHEDULED_CONTRIBUTION_WALLET'
+          ? 'FIRSTKEY_SAVINGS'
+          : 'EXTERNAL';
+    this.ledger
+      .recordPair(
+        {
+          userId,
+          accountType: 'WALLET',
+          amount: amountNGN,
+          balanceAfter: newBalance,
+          eventType,
+          reference: `${ref}-dbt`,
+          description,
+          groupRef: opts?.ledgerGroupRef,
+        },
+        {
+          userId,
+          accountType: creditAccount,
+          amount: amountNGN,
+          balanceAfter: 0,
+          eventType,
+          reference: `${ref}-crd`,
+          description,
+          groupRef: opts?.ledgerGroupRef,
+        },
+      )
+      .catch(() => {});
   }
 
   // ── Escrow ────────────────────────────────────────────────────────────────
@@ -908,14 +964,46 @@ export class WalletService {
     return { escrowId, status: newStatus };
   }
 
-  // ── Withdrawal ────────────────────────────────────────────────────────────
+  // ── Withdrawal bank account management ───────────────────────────────────
 
-  async requestWithdrawal(
+  private readonly WITHDRAWAL_MIN = 1000;
+  private readonly WITHDRAWAL_FEE = 50;
+  private readonly BANK_CHANGE_COOLDOWN_DAYS = 30;
+
+  async getBankAccount(userId: string) {
+    const wallet = await this.prisma.walletAccount.findUnique({
+      where: { userId },
+      select: {
+        withdrawalAccountNumber: true,
+        withdrawalBankCode: true,
+        withdrawalBankName: true,
+        withdrawalAccountName: true,
+        withdrawalAccountVerifiedAt: true,
+        withdrawalAccountChangedAt: true,
+      },
+    });
+    if (!wallet) throw new NotFoundException('Wallet not found');
+
+    const cooldownDaysLeft = wallet.withdrawalAccountChangedAt
+      ? Math.max(
+          0,
+          this.BANK_CHANGE_COOLDOWN_DAYS -
+            Math.floor(
+              (Date.now() -
+                new Date(wallet.withdrawalAccountChangedAt).getTime()) /
+                86_400_000,
+            ),
+        )
+      : 0;
+
+    return { ...wallet, cooldownDaysLeft };
+  }
+
+  async saveBankAccount(
     userId: string,
-    amountNGN: number,
-    bankAccountNumber: string,
+    accountNumber: string,
     bankCode: string,
-    bankAccountName: string,
+    bankName: string,
     pin: string,
   ) {
     await this.checkPin(userId, pin);
@@ -925,63 +1013,204 @@ export class WalletService {
     });
     if (!wallet) throw new NotFoundException('Wallet not found');
     if (!wallet.isActive)
-      throw new BadRequestException('Complete KYC before withdrawing');
-    if (wallet.availableBalance < amountNGN)
-      throw new BadRequestException('Insufficient balance');
-
-    // Debit locally first
-    await this.debitWallet(
-      userId,
-      amountNGN,
-      `Withdrawal to ${bankAccountName}`,
-      { type: 'WITHDRAWAL', ledgerEvent: 'WITHDRAWAL' },
-    );
-
-    // Initiate NIP transfer from master Anchor account
-    const masterAccountId = process.env.ANCHOR_MASTER_ACCOUNT_ID ?? '';
-    if (!masterAccountId) {
-      this.logger.warn(
-        'ANCHOR_MASTER_ACCOUNT_ID not set — withdrawal queued without transfer',
+      throw new BadRequestException(
+        'Complete KYC before adding a withdrawal account',
       );
-      return { message: 'Withdrawal queued (master account not configured)' };
+
+    // 30-day cooldown check (skip if first time setting account)
+    if (wallet.withdrawalAccountChangedAt) {
+      const daysSinceChange = Math.floor(
+        (Date.now() - new Date(wallet.withdrawalAccountChangedAt).getTime()) /
+          86_400_000,
+      );
+      if (daysSinceChange < this.BANK_CHANGE_COOLDOWN_DAYS) {
+        throw new BadRequestException(
+          `You can only change your withdrawal account once every ${this.BANK_CHANGE_COOLDOWN_DAYS} days. ` +
+            `Please try again in ${this.BANK_CHANGE_COOLDOWN_DAYS - daysSinceChange} day(s).`,
+        );
+      }
     }
 
+    // Verify account and get name from bank
+    const verifiedName = await this.verifyBankAccount(accountNumber, bankCode);
+    const returnedName = verifiedName.accountName.toUpperCase();
+
+    // Fuzzy name match — at least 2 of first/middle/last must appear in the bank account name
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { firstName: true, lastName: true },
+      select: { firstName: true, lastName: true, middleName: true },
     });
 
-    const counterpartyId = await this.anchor.createCounterparty({
-      bankCode,
-      accountNumber: bankAccountNumber,
-      accountName: bankAccountName,
-    });
+    const nameParts = [user?.firstName, user?.middleName, user?.lastName]
+      .filter(Boolean)
+      .map((n) => n!.toUpperCase());
 
-    await this.anchor.initiateTransfer({
-      accountId: masterAccountId,
-      counterpartyId,
-      amountNaira: amountNGN,
-      reference: randomUUID(),
-      reason: `Leadsage withdrawal — ${user?.firstName} ${user?.lastName}`,
+    const matchCount = nameParts.filter((part) =>
+      returnedName.includes(part),
+    ).length;
+
+    if (matchCount < 2) {
+      throw new BadRequestException(
+        `The account name "${verifiedName.accountName}" does not match your registered name. ` +
+          'You can only withdraw to your own bank account.',
+      );
+    }
+
+    await this.prisma.walletAccount.update({
+      where: { userId },
+      data: {
+        withdrawalAccountNumber: accountNumber,
+        withdrawalBankCode: bankCode,
+        withdrawalBankName: bankName,
+        withdrawalAccountName: verifiedName.accountName,
+        withdrawalAccountVerifiedAt: new Date(),
+        withdrawalAccountChangedAt: new Date(),
+      },
     });
 
     return {
-      message: `₦${amountNGN.toLocaleString()} sent to ${bankAccountName}`,
+      message: 'Withdrawal account saved successfully',
+      accountName: verifiedName.accountName,
     };
   }
 
-  // ── Bank account verification ──────────────────────────────────────────────
+  // ── Withdrawal request ─────────────────────────────────────────────────────
+
+  async requestWithdrawal(userId: string, amount: number, pin: string) {
+    await this.checkPin(userId, pin);
+
+    if (amount < this.WITHDRAWAL_MIN) {
+      throw new BadRequestException(
+        `Minimum withdrawal amount is ₦${this.WITHDRAWAL_MIN.toLocaleString()}`,
+      );
+    }
+
+    const wallet = await this.prisma.walletAccount.findUnique({
+      where: { userId },
+    });
+    if (!wallet) throw new NotFoundException('Wallet not found');
+    if (!wallet.isActive)
+      throw new BadRequestException('Complete KYC before withdrawing');
+
+    if (!wallet.withdrawalAccountNumber) {
+      throw new BadRequestException(
+        'Please set a verified withdrawal account before requesting a withdrawal',
+      );
+    }
+
+    if (wallet.availableBalance < amount) {
+      throw new BadRequestException('Insufficient wallet balance');
+    }
+
+    // Only one pending request at a time
+    const existingPending = await this.prisma.withdrawalRequest.findFirst({
+      where: { userId, status: 'PENDING' },
+    });
+    if (existingPending) {
+      throw new BadRequestException(
+        'You already have a pending withdrawal request. Please wait for it to be processed.',
+      );
+    }
+
+    const fee = this.WITHDRAWAL_FEE;
+    const netAmount = amount - fee;
+
+    const request = await this.prisma.withdrawalRequest.create({
+      data: {
+        userId,
+        amount,
+        fee,
+        netAmount,
+        bankAccountNumber: wallet.withdrawalAccountNumber,
+        bankCode: wallet.withdrawalBankCode!,
+        bankName: wallet.withdrawalBankName!,
+        accountName: wallet.withdrawalAccountName!,
+      },
+    });
+
+    return {
+      id: request.id,
+      message: `Withdrawal request submitted. You will receive ₦${netAmount.toLocaleString()} within 24 hours.`,
+      amount,
+      fee,
+      netAmount,
+    };
+  }
+
+  async cancelWithdrawal(userId: string, requestId: string) {
+    const request = await this.prisma.withdrawalRequest.findFirst({
+      where: { id: requestId, userId },
+    });
+    if (!request) throw new NotFoundException('Withdrawal request not found');
+    if (request.status !== 'PENDING') {
+      throw new BadRequestException('Only pending requests can be cancelled');
+    }
+
+    await this.prisma.withdrawalRequest.update({
+      where: { id: requestId },
+      data: { status: 'CANCELLED' },
+    });
+
+    return { message: 'Withdrawal request cancelled' };
+  }
+
+  async getWithdrawalRequests(userId: string) {
+    return this.prisma.withdrawalRequest.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+    });
+  }
+
+  // ── Bank account verification (public — for name lookup) ──────────────────
 
   async verifyBankAccount(accountNumber: string, bankCode: string) {
     try {
-      const result = await this.anchor.verifyAccount(bankCode, accountNumber);
-      const name = result?.data?.attributes?.accountName ?? result?.accountName;
-      if (!name) throw new Error('No account name returned');
-      return { accountName: name };
+      // Use Paystack's resolve-account API — it accepts standard CBN bank codes
+      // (the same codes we display in the frontend BANKS list) and is free to call.
+      const result = await this.paystack.resolveAccount(
+        accountNumber,
+        bankCode,
+      );
+      return { accountName: result.accountName };
     } catch {
       throw new BadRequestException(
-        'Could not verify account — check number and bank',
+        'Could not verify account — check the account number and bank',
       );
     }
+  }
+
+  // ── Used by admin service to execute a withdrawal ─────────────────────────
+
+  async executeWithdrawalTransfer(
+    userId: string,
+    amount: number,
+    netAmount: number,
+    accountNumber: string,
+    bankCode: string,
+    accountName: string,
+    reference: string,
+  ) {
+    // Debit wallet for the full requested amount (fee already reflected in netAmount shown to user)
+    await this.debitWallet(userId, amount, `Withdrawal to ${accountName}`, {
+      type: 'WITHDRAWAL',
+      ledgerEvent: 'WITHDRAWAL',
+      reference,
+    });
+
+    // Use Paystack's transfer API — accepts standard CBN bank codes,
+    // debits the Leadsage Paystack business balance.
+    const recipientCode = await this.paystack.createTransferRecipient(
+      accountName,
+      accountNumber,
+      bankCode,
+    );
+
+    await this.paystack.initiatePaystackTransfer(
+      recipientCode,
+      netAmount,
+      `Leadsage withdrawal`,
+      reference,
+    );
   }
 }

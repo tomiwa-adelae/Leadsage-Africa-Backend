@@ -27,6 +27,11 @@ export class UpdateUserProfileDto {
 
   @IsString()
   @IsOptional()
+  @MaxLength(100)
+  middleName?: string;
+
+  @IsString()
+  @IsOptional()
   image?: string;
 
   @IsString()

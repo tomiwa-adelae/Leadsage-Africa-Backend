@@ -541,6 +541,7 @@ export class AuthService {
       where: { id: userId },
       data: {
         // Personal info
+        ...(dto.middleName !== undefined && { middleName: dto.middleName }),
         ...(dto.gender !== undefined && { gender: dto.gender }),
         ...(dto.dob !== undefined && { dob: dto.dob }),
         // Location
@@ -644,6 +645,7 @@ export class AuthService {
   async updateProfile(userId: string, dto: {
     firstName?: string;
     lastName?: string;
+    middleName?: string;
     phoneNumber?: string;
     dob?: string;
     gender?: string;
@@ -658,6 +660,7 @@ export class AuthService {
       data: {
         ...(dto.firstName !== undefined && { firstName: dto.firstName }),
         ...(dto.lastName !== undefined && { lastName: dto.lastName }),
+        ...(dto.middleName !== undefined && { middleName: dto.middleName }),
         ...(dto.phoneNumber !== undefined && { phoneNumber: dto.phoneNumber }),
         ...(dto.dob !== undefined && { dob: dto.dob }),
         ...(dto.gender !== undefined && { gender: dto.gender }),
@@ -671,6 +674,7 @@ export class AuthService {
         id: true,
         firstName: true,
         lastName: true,
+        middleName: true,
         email: true,
         phoneNumber: true,
         image: true,

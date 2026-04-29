@@ -272,7 +272,18 @@ export class SavingsService {
       return { synced: false, message: 'No Anchor account linked to this plan yet.' };
     }
 
-    const anchorBalance = await this.anchor.getAccountBalance(plan.anchorAccountId);
+    let anchorBalance: number;
+    try {
+      anchorBalance = await this.anchor.getAccountBalance(plan.anchorAccountId);
+    } catch (e: any) {
+      const isNetworkError = e?.cause?.code === 'EAI_AGAIN' || e?.code === 'EAI_AGAIN'
+        || e?.message?.includes('fetch failed') || e?.message?.includes('ECONNREFUSED');
+      if (isNetworkError) {
+        this.logger.warn(`Anchor unreachable during savings sync for plan ${planId}: ${e?.cause?.code ?? e?.message}`);
+        return { synced: false, message: 'Could not reach Anchor — please try again shortly.' };
+      }
+      throw e;
+    }
     const localBalance = plan.totalDeposited + plan.interestEarned;
     const diff = +(anchorBalance - localBalance).toFixed(2);
 

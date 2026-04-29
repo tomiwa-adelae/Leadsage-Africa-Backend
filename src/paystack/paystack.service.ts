@@ -161,6 +161,67 @@ export class PaystackService {
   }
 
   /**
+   * Create a transfer recipient on Paystack.
+   * Returns the recipient_code used to initiate the transfer.
+   */
+  async createTransferRecipient(
+    name: string,
+    accountNumber: string,
+    bankCode: string,
+  ): Promise<string> {
+    const data = await this.request<{ recipient_code: string }>(
+      'POST',
+      '/transferrecipient',
+      {
+        type: 'nuban',
+        name,
+        account_number: accountNumber,
+        bank_code: bankCode,
+        currency: 'NGN',
+      },
+    );
+    return data.recipient_code;
+  }
+
+  /**
+   * Initiate a Paystack transfer to a recipient.
+   * Paystack debits the business Paystack balance.
+   */
+  async initiatePaystackTransfer(
+    recipientCode: string,
+    amountNGN: number,
+    reason: string,
+    reference: string,
+  ): Promise<void> {
+    await this.request<any>('POST', '/transfer', {
+      source: 'balance',
+      amount: Math.round(amountNGN * 100), // kobo
+      recipient: recipientCode,
+      reason: reason.slice(0, 100),
+      reference,
+    });
+  }
+
+  /**
+   * Resolve a Nigerian bank account to get the account holder's name.
+   * Uses CBN bank codes (same as our BANKS list in the frontend).
+   * Paystack charges nothing for this — it's a free NIBSS lookup.
+   */
+  async resolveAccount(
+    accountNumber: string,
+    bankCode: string,
+  ): Promise<{ accountName: string; accountNumber: string }> {
+    const data = await this.request<{ account_name: string; account_number: string }>(
+      'GET',
+      `/bank/resolve?account_number=${accountNumber}&bank_code=${bankCode}`,
+    );
+    return {
+      accountName: data.account_name,
+      accountNumber: data.account_number,
+    };
+  }
+
+  /**
    * Verify that a webhook request is genuinely from Paystack by checking
    * the HMAC-SHA512 signature in the `x-paystack-signature` header.
    */
